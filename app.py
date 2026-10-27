@@ -96,9 +96,20 @@ def init_db():
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT)""",
+            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0)""",
     ]:
         con.execute(stmt)
+    try:
+        con.execute("ALTER TABLE bills ADD COLUMN amount_paid REAL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE clients ADD COLUMN created_by TEXT")
+    except Exception:
+        pass
+    con.execute(f"""CREATE TABLE IF NOT EXISTS audit_log (
+        id {id_type}, at TEXT NOT NULL, username TEXT NOT NULL,
+        action TEXT NOT NULL, detail TEXT)""")
     if not con.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():
         salt = secrets.token_hex(16)
         h = hashlib.pbkdf2_hmac("sha256", b"admin123", salt.encode(), 100000).hex()
@@ -106,6 +117,12 @@ def init_db():
                     ("admin", h, salt, "admin"))
     con.commit()
     con.close()
+
+
+def log_action(con, username, action, detail=""):
+    from datetime import datetime
+    con.execute("INSERT INTO audit_log (at, username, action, detail) VALUES (?,?,?,?)",
+                (datetime.now().strftime("%Y-%m-%d %H:%M"), username, action, detail))
 
 
 def check_pw(username, password):
@@ -165,7 +182,7 @@ button:hover{{background:#0f63c7}} .red{{color:#b00020}} .muted{{color:#64748b;f
 <div class="brand">Bill Tracker</div>
 <a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/bills">Bills</a>
 <a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a>
-<a href="/users">Users</a><a href="/change-password">Change password</a>
+<a href="/users">Users</a><a href="/activity">Activity — who did what</a><a href="/change-password">Change password</a>
 <a href="/logout">Logout ({esc(user[0])})</a></aside>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -184,9 +201,21 @@ button,.btn{{background:#1a7ae6;color:#fff;border:0;padding:10px 16px;border-rad
 button:hover{{background:#0f63c7}} .badge{{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}}
 .b-draft{{background:#e2e8f0;color:#475569}} .b-sent{{background:#dbeafe;color:#1d4ed8}} .b-paid{{background:#dcfce7;color:#15803d}}
 .b-part{{background:#fef3c7;color:#b45309}} .b-over{{background:#fee2e2;color:#b91c1c}}
+.topbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}}
+.topbar form input{{width:260px}}
+@media print{{aside,.topbar,.btn,button{{display:none!important}} main{{padding:0}} .card{{box-shadow:none;border:0}}}}
+.invoice-head{{display:flex;justify-content:space-between;align-items:flex-start}}
+.invoice-head h2{{font-size:26px;margin:0}} .invoice-meta{{text-align:right;color:#64748b}}
+.totals{{width:320px;margin-left:auto}} .totals td{{border:0}}
+.chart{{display:flex;align-items:flex-end;gap:10px;height:120px;padding-top:10px}}
+.bar{{flex:1;background:#1a7ae6;border-radius:6px 6px 0 0;min-height:4px}}
+.bar-wrap{{flex:1;text-align:center;font-size:11px;color:#64748b}}
 .warn{{background:#fffbeb;border:1px solid #fde68a;padding:12px;border-radius:10px}} .red{{color:#b91c1c}} .muted{{color:#64748b}}
 @media(max-width:760px){{.layout{{flex-direction:column}} aside{{width:100%}} .kpis{{grid-template-columns:1fr 1fr}}}}
-</style></head><body><div class="layout">{nav}<main><h1>{esc(title)}</h1>{body}</main></div></body></html>"""
+</style></head><body><div class="layout">{nav}<main><div class="topbar"><div><a class="btn" href="/clients">+ New client</a>
+<a class="btn" href="/bills">+ New bill</a></div>
+<form method="get" action="/bills"><input name="search" placeholder="Search bill or client…"></form></div>
+<h1>{esc(title)}</h1>{body}</main></div></body></html>"""
 
 
 class H(BaseHTTPRequestHandler):
@@ -240,6 +269,15 @@ Password <input type="password" name="password" required></p>
             return self.not_billed_page(u)
         if path == "/users":
             return self.users_page(u)
+        if path == "/activity":
+            con = db()
+            rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
+            con.close()
+            tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
+                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
+            return self.send_html(page("Activity — who did what", u, f"""<div class="card">
+<p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
+<table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
         if path == "/change-password":
             return self.send_html(page("Change password", u, """
 <form method="post" action="/change-password">
@@ -254,6 +292,8 @@ password your admin gave you, then set your own here.</p>"""))
             return self.redirect("/login")
         if path == "/export.csv":
             return self.export_csv()
+        if path.startswith("/bills/") and path[7:].isdigit():
+            return self.bill_detail_page(u, int(path[7:]))
         return self.send_html(page("Not found", u, "<p>Page not found.</p>"), 404)
 
     def dashboard(self, u):
@@ -266,7 +306,29 @@ password your admin gave you, then set your own here.</p>"""))
         billed = sum(b["total"] for b in bills)
         paid = sum(b["total"] for b in bills if b["status"] == "Paid")
         overdue = [b for b in bills if b["status"] == "Overdue"]
-        tr = "".join(f"<tr><td>{esc(r['bill_no'])}</td><td>{esc(r['cname'])}</td>"
+        from collections import defaultdict
+        from datetime import date as _d
+        by_period = defaultdict(float)
+        for b in bills:
+            by_period[b["period_label"]] += b["total"]
+        con2 = db()
+        top = con2.execute("""SELECT c.name AS n, SUM(b.total) AS t FROM bills b
+            JOIN clients c ON c.id=b.client_id GROUP BY c.name ORDER BY t DESC LIMIT 5""").fetchall()
+        con2.close()
+        periods = sorted(by_period)[-6:]
+        mx = max(by_period.values()) if by_period else 1
+        bars = "".join(f"<div class='bar-wrap'><div class='bar' style='height:{by_period[pp]/mx*100:.0f}%'></div>{esc(pp)}<br>&#8377;{by_period[pp]:,.0f}</div>" for pp in periods)
+        top_tr = "".join(f"<tr><td>{esc(r['n'])}</td><td class='amt'>&#8377;{r['t']:,.2f}</td></tr>" for r in top)
+        today = _d.today().isoformat()
+        aging = {"0-30 days": 0, "31-60 days": 0, "60+ days": 0}
+        for b in bills:
+            if b["status"] == "Paid" or not b["due_date"] or b["due_date"] >= today:
+                continue
+            days = (_d.fromisoformat(today) - _d.fromisoformat(b["due_date"])).days
+            k = "0-30 days" if days <= 30 else "31-60 days" if days <= 60 else "60+ days"
+            aging[k] += (b["total"] - (b["amount_paid"] or 0))
+        aging_tr = "".join(f"<tr><td>{k}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in aging.items())
+        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td class='amt'>&#8377;{r['total']:,.2f}</td>"
                      f"<td>{badge(r['status'])}</td></tr>" for r in recent)
         body = f"""<div class="kpis">
@@ -276,6 +338,11 @@ password your admin gave you, then set your own here.</p>"""))
 <div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid:,.2f}</b></div></div>
 <div class="card"><b>Overdue bills: <span class="red">{len(overdue)}</span></b> &nbsp;|&nbsp;
 Check <a href="/not-billed">Not billed yet</a> before month-end so no company is missed.</div>
+<div class="card"><b>Billed by period</b><div class="chart">{bars}</div></div>
+<div class="card"><b>Top clients by billed amount</b>
+<table><tr><th>Client</th><th style="text-align:right">Billed</th></tr>{top_tr}</table></div>
+<div class="card"><b>Overdue ageing (unpaid, past due date)</b>
+<table><tr><th>Age</th><th style="text-align:right">Outstanding</th></tr>{aging_tr}</table></div>
 <div class="card"><b>Recent bills</b>
 <table><tr><th>Bill</th><th>Client</th><th>Period</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table></div>"""
         self.send_html(page("Dashboard", u, body))
@@ -312,9 +379,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         rows = con.execute(sql + " ORDER BY b.id DESC", args).fetchall()
         con.close()
         opts = "".join(f"<option value='{r['id']}'>{esc(r['name'])}</option>" for r in clients)
-        tr = "".join(f"<tr><td>{esc(r['bill_no'])}</td><td>{esc(r['cname'])}</td>"
+        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
-                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td></tr>" for r in rows)
+                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
             rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
@@ -331,7 +398,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <button>Add bill</button></p></form>
 <form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table>
+<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th><th>Created by</th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -360,6 +427,38 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <b>no bill for the current period</b>. This is the list to clear before month-end.</div>
 <table><tr><th>Client</th><th>Office</th><th>Cycle</th><th>Period missing</th></tr>{tr}</table>"""
         self.send_html(page("Not billed yet", u, body))
+
+    def bill_detail_page(self, u, bill_id):
+        con = db()
+        r = con.execute("""SELECT b.*, c.name AS cname, c.gstin AS cgstin, c.contact AS ccontact,
+            c.email AS cemail, c.office AS coffice FROM bills b
+            JOIN clients c ON c.id=b.client_id WHERE b.id=?""", (bill_id,)).fetchone()
+        con.close()
+        if not r:
+            return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
+        paid = r["amount_paid"] or 0
+        balance = r["total"] - paid
+        body = f"""<div class="card"><div class="invoice-head"><div>
+<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
+<div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
+<div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
+<p><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
+<table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
+<tr><td>Professional services — {esc(r['period_label'])}<br><span class="muted">{esc(r['notes'])}</span></td>
+<td class="amt">&#8377;{r['amount']:,.2f}</td></tr></table>
+<table class="totals"><tr><td>Subtotal</td><td class="amt">&#8377;{r['amount']:,.2f}</td></tr>
+<tr><td>GST ({r['gst_percent']:.0f}%)</td><td class="amt">&#8377;{r['total'] - r['amount']:,.2f}</td></tr>
+<tr><td><b>Total</b></td><td class="amt"><b>&#8377;{r['total']:,.2f}</b></td></tr>
+<tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
+<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance:,.2f}</b></td></tr></table>
+<p><button onclick="window.print()">Print / Save as PDF</button></p></div>
+<div class="card"><b>Record payment</b>
+<form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
+<input name="amount" type="number" step="0.01" placeholder="Amount received" required>
+<input name="pay_date" type="date">
+<button>Record payment</button></form>
+<p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""
+        self.send_html(page(f"Invoice {r['bill_no']}", u, body))
 
     def users_page(self, u):
         if u[1] != "admin":
@@ -418,6 +517,15 @@ it on the Change password page straight away.</p>"""
             return
         if not u:
             return self.redirect("/login")
+        if path == "/activity":
+            con = db()
+            rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
+            con.close()
+            tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
+                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
+            return self.send_html(page("Activity — who did what", u, f"""<div class="card">
+<p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
+<table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
         if path == "/change-password":
             if check_pw(u[0], f.get("current", "")) is None:
                 return self.send_html(page("Change password", u, "<p class='red'>Current password is wrong.</p>"), 401)
@@ -427,16 +535,29 @@ it on the Change password page straight away.</p>"""
             salt = secrets.token_hex(16)
             h = hashlib.pbkdf2_hmac("sha256", f["new"].encode(), salt.encode(), 100000).hex()
             con.execute("UPDATE users SET pass_hash=?, salt=? WHERE username=?", (h, salt, u[0]))
+            log_action(con, u[0], "Changed password", "")
             con.commit(); con.close()
             return self.send_html(page("Password changed", u, "<p><b>Password changed.</b> Use your new password next time you log in. <a href='/dashboard'>Back to Dashboard</a></p>"))
+        if path == "/bill-payment":
+            con = db()
+            r = con.execute("SELECT total, amount_paid FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
+            if r:
+                new_paid = (r["amount_paid"] or 0) + float(f["amount"])
+                status = "Paid" if new_paid >= r["total"] - 0.01 else "Part-paid"
+                con.execute("UPDATE bills SET amount_paid=?, status=? WHERE id=?", (new_paid, status, int(f["bill_id"])))
+                log_action(con, u[0], "Recorded payment", f"Bill id {f['bill_id']}: Rs {f['amount']} -> {status}")
+                con.commit()
+            con.close()
+            return self.redirect(f"/bills/{f['bill_id']}")
         con = db()
         try:
             if path == "/clients":
-                con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee)
-                    VALUES (?,?,?,?,?,?,?,?)""",
+                con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
                     (f["name"], f.get("gstin", ""), f.get("contact", ""), f.get("phone", ""),
                      f.get("email", ""), f.get("office", ""), f.get("cycle", "Monthly"),
-                     float(f.get("fee") or 0)))
+                     float(f.get("fee") or 0), u[0]))
+                log_action(con, u[0], "Added client", f["name"])
             elif path == "/bills":
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
@@ -445,13 +566,16 @@ it on the Change password page straight away.</p>"""
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
                      f.get("status", "Draft"), f.get("notes", ""), u[0]))
+                log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
             elif path == "/bill-status":
                 con.execute("UPDATE bills SET status=? WHERE bill_no=?", (f["status"], f["bill_no"]))
+                log_action(con, u[0], "Changed bill status", f"{f['bill_no']} -> {f['status']}")
             elif path == "/users" and u[1] == "admin":
                 salt = secrets.token_hex(16)
                 h = hashlib.pbkdf2_hmac("sha256", f["password"].encode(), salt.encode(), 100000).hex()
                 con.execute("INSERT INTO users (username, pass_hash, salt, role) VALUES (?,?,?,?)",
                             (f["username"], h, salt, f.get("role", "staff")))
+                log_action(con, u[0], "Added user", f["username"] + " (" + f.get("role", "staff") + ")")
             con.commit()
         except INTEGRITY_ERRORS:
             con.close()
