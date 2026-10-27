@@ -191,7 +191,7 @@ button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4
     nav = f"""<aside>
 <div class="brand">Narayan Bijur<br><span>Bill Tracker</span></div>
 <a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/import-clients">Import clients</a><a href="/bills">Bills</a>
-<a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a>
+<a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a><a href="/export.xlsx">Export Excel</a>
 <a href="/users">Users</a><a href="/activity">Activity — who did what</a><a href="/change-password">Change password</a>
 <a href="/logout">Logout ({esc(user[0])})</a></aside>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
@@ -312,6 +312,8 @@ password your admin gave you, then set your own here.</p>"""))
             return self.redirect("/login")
         if path == "/export.csv":
             return self.export_csv()
+        if path == "/export.xlsx":
+            return self.export_xlsx()
         if path.startswith("/bills/") and path[7:].isdigit():
             return self.bill_detail_page(u, int(path[7:]))
         return self.send_html(page("Not found", u, "<p>Page not found.</p>"), 404)
@@ -540,6 +542,45 @@ it on the Change password page straight away.</p>"""
         self.send_response(200)
         self.send_header("Content-Type", "text/csv")
         self.send_header("Content-Disposition", "attachment; filename=bills.csv")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def export_xlsx(self):
+        import io
+        try:
+            import openpyxl
+        except ImportError:
+            return self.send_html(page("Export Excel", self.user(), "<p>Excel export is not available on this server.</p>"), 500)
+        con = db()
+        wb = openpyxl.Workbook()
+        def sheet(name, headers, rows, cols):
+            ws = wb.active if name == "Bills" else wb.create_sheet(name)
+            if name == "Bills":
+                ws.title = name
+            ws.append(headers)
+            for r in rows:
+                ws.append([r[c] for c in cols])
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width = 18
+        bills = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date, b.due_date,
+            b.amount, b.gst_percent, b.total, b.amount_paid, b.status, b.notes, b.created_by
+            FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
+        clients = con.execute("SELECT * FROM clients ORDER BY name").fetchall()
+        activity = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").fetchall()
+        con.close()
+        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by"],
+              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by"])
+        sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
+              clients, ["name", "gstin", "contact", "phone", "email", "office", "cycle", "fee", "active", "created_by"])
+        sheet("Activity", ["When", "Staff", "Action", "Detail"],
+              activity, ["at", "username", "action", "detail"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        data = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", "attachment; filename=bill-tracker.xlsx")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
