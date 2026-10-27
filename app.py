@@ -96,7 +96,7 @@ def init_db():
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT, created_at TEXT, bill_kind TEXT DEFAULT 'Final', balance_bill_id INTEGER)""",
+            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT, created_at TEXT, bill_kind TEXT DEFAULT 'Final', balance_bill_id INTEGER, heading TEXT)""",
     ]:
         con.execute(stmt)
     # Commit the base tables first. On PostgreSQL a failed statement
@@ -115,6 +115,7 @@ def init_db():
         "ALTER TABLE clients ADD COLUMN created_at TEXT",
         "ALTER TABLE bills ADD COLUMN bill_kind TEXT DEFAULT 'Final'",
         "ALTER TABLE bills ADD COLUMN balance_bill_id INTEGER",
+        "ALTER TABLE bills ADD COLUMN heading TEXT",
     ]:
         try:
             con.execute(alter)
@@ -472,7 +473,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         if kind_filter:
             rows = [r for r in rows if (r["bill_kind"] or "Final") == kind_filter]
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
-                     f"<td>{esc(r['bill_kind'] or 'Final')}</td><td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
+                     f"<td>{esc(r['bill_kind'] or 'Final')}</td><td>{esc(r['heading'] or '')}</td><td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
                      f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td>{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}<td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
@@ -482,6 +483,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <select name="client_id" id="bill_client" required onchange="var o=this.options[this.selectedIndex];var a=document.getElementById('bill_amount');if(o&&o.dataset.fee&&parseFloat(o.dataset.fee)>0)a.value=o.dataset.fee">{opts}</select>
 <select name="bill_kind"><option>Final</option><option>Pro forma</option></select>
 <input name="period_label" placeholder="Period e.g. 2026-10" required>
+<input name="heading" placeholder="Heading e.g. Professional fees — Oct 2026">
 <input name="bill_date" type="date" required>
 <input name="due_date" type="date">
 <input name="amount" id="bill_amount" type="number" step="0.01" placeholder="Amount (ex-GST)" required>
@@ -496,7 +498,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <select name="status" onchange="this.form.submit()">{filt}</select>
 <select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select>
 <select name="kind" onchange="this.form.submit()"><option value="">All kinds</option><option {'selected' if qs.get("kind", [""])[0] == 'Final' else ''}>Final</option><option {'selected' if qs.get("kind", [""])[0] == 'Pro forma' else ''}>Pro forma</option></select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Kind</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
+<table><tr><th>Bill no.</th><th>Client</th><th>Kind</th><th>Heading</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -540,7 +542,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         balance = r["total"] - paid
         if u[1] != "admin":
             self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
 {'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
@@ -569,7 +571,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""))
             return
         body = f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
 {'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
@@ -611,7 +613,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         billed = sum(b["total"] for b in bills)
         paid = sum(b["amount_paid"] or 0 for b in bills)
         settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] in ("Settled", "Balance billed"))
-        tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['period_label'])}</td>"
+        tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['heading'] or '')}</td><td>{esc(b['period_label'])}</td>"
                      f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
                      f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
                      f"<td>{esc(b['issued_by'] or '')}</td><td>{fmt_ts(b['created_at'])}</td></tr>" for b in bills)
@@ -621,7 +623,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <p>{esc(c['gstin'])}<br>{esc(c['contact'])} {esc(c['phone'])} {esc(c['email'])}<br>Office: {esc(c['office'])} | Cycle: {esc(c['cycle'])} | Usual fee: &#8377;{c['fee']:,.2f}</p>
 <p>{edit}</p></div>
 <div class="card"><b>Bills for this client</b> <span class="muted">{scope}</span>
-<table><tr><th>Bill</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
+<table><tr><th>Bill</th><th>Heading</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
 <table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td>Settled / written off for this client</td><td class="amt">&#8377;{settled_writeoff:,.2f}</td></tr>
@@ -662,6 +664,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         opts = "".join(f"<option {'selected' if st == r['status'] else ''}>{st}</option>" for st in STATUSES)
         body = f"""<form method="post" action="/bill-edit"><input type="hidden" name="id" value="{bid}"><p>
 Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
+<input name="heading" value="{esc(r['heading'] or '')}" placeholder="Heading">
 <input name="period_label" value="{esc(r['period_label'])}" required>
 <input name="bill_date" type="date" value="{esc(r['bill_date'])}" required>
 <input name="due_date" type="date" value="{esc(r['due_date']) or ''}">
@@ -716,14 +719,14 @@ it on the Change password page straight away.</p>"""
         import csv, io
         con = db()
         rows = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date,
-            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes, b.issued_by
+            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes, b.issued_by, b.heading
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         con.close()
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes", "Issued by"])
+        w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes", "Issued by", "Heading"])
         cols = ["bill_no", "name", "period_label", "bill_date", "due_date",
-                "amount", "gst_percent", "total", "status", "notes", "issued_by"]
+                "amount", "gst_percent", "total", "status", "notes", "issued_by", "heading"]
         w.writerows([[r[c] for c in cols] for r in rows])
         data = buf.getvalue().encode()
         self.send_response(200)
@@ -751,13 +754,13 @@ it on the Change password page straight away.</p>"""
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = 18
         bills = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date, b.due_date,
-            b.amount, b.gst_percent, b.total, b.amount_paid, b.status, b.notes, b.created_by, b.issued_by
+            b.amount, b.gst_percent, b.total, b.amount_paid, b.status, b.notes, b.created_by, b.issued_by, b.heading
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         clients = con.execute("SELECT * FROM clients ORDER BY name").fetchall()
         activity = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").fetchall()
         con.close()
-        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by"],
-              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by"])
+        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by", "Heading"],
+              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by", "heading"])
         sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
               clients, ["name", "gstin", "contact", "phone", "email", "office", "cycle", "fee", "active", "created_by"])
         sheet("Activity", ["When", "Staff", "Action", "Detail"],
@@ -887,12 +890,13 @@ it on the Change password page straight away.</p>"""
                 amt = round(balance - gst_amt, 2)
                 new_no = next_bill_no(con)
                 cur = con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
-                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind, heading)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (new_no, bill["client_id"], bill["period_label"], f.get("bill_date") or now_ist().strftime("%Y-%m-%d"),
                      bill["due_date"], amt, gst, balance, "Draft",
                      f"Balance bill for {bill['bill_no']} (part payment Rs {bill['amount_paid']:,.2f} received, balance Rs {balance:,.2f})",
-                     u[0], bill["issued_by"] or "", now_ist().strftime("%Y-%m-%d %H:%M"), bill["bill_kind"] or "Final"))
+                     u[0], bill["issued_by"] or "", now_ist().strftime("%Y-%m-%d %H:%M"), bill["bill_kind"] or "Final",
+                     (("Balance — " + bill["heading"]) if bill["heading"] else "Balance bill")))
                 new_id = cur.lastrowid if hasattr(cur, "lastrowid") else con.execute("SELECT id FROM bills WHERE bill_no=?", (new_no,)).fetchone()["id"]
                 con.execute("UPDATE bills SET status='Balance billed', balance_bill_id=? WHERE id=?", (new_id, bill["id"]))
                 log_action(con, u[0], "Raised balance bill", f"{bill['bill_no']} -> {new_no} for balance Rs {balance:,.2f}")
@@ -916,10 +920,10 @@ it on the Change password page straight away.</p>"""
                         return self.send_html(page("Edit bill", u, "<p>You can only edit bills you put in.</p>"), 403)
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""UPDATE bills SET period_label=?, bill_date=?, due_date=?, amount=?, gst_percent=?,
-                    total=?, status=?, notes=?, issued_by=?, bill_kind=? WHERE id=?""",
+                    total=?, status=?, notes=?, issued_by=?, bill_kind=?, heading=? WHERE id=?""",
                     (f["period_label"], f["bill_date"], f.get("due_date") or None, amt, gst,
                      round(amt * (1 + gst / 100), 2), f.get("status", "Draft"), f.get("notes", ""),
-                     f.get("issued_by", ""), f.get("bill_kind", "Final"), int(f["id"])))
+                     f.get("issued_by", ""), f.get("bill_kind", "Final"), f.get("heading", ""), int(f["id"])))
                 log_action(con, u[0], "Edited bill", f"Bill id {f['id']}")
                 con.commit(); con.close()
                 return self.redirect("/bills")
@@ -974,12 +978,12 @@ it on the Change password page straight away.</p>"""
             elif path == "/bills":
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
-                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind, heading)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
                      f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", ""),
-                     now_ist().strftime("%Y-%m-%d %H:%M"), f.get("bill_kind", "Final")))
+                     now_ist().strftime("%Y-%m-%d %H:%M"), f.get("bill_kind", "Final"), f.get("heading", "")))
                 if f.get("remember_fee"):
                     con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
