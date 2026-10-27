@@ -284,20 +284,30 @@ Password <input type="password" name="password" required></p>
             con = db()
             rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
             con.close()
+            import re as _re
+            def _detail(r):
+                d = r['detail']
+                if u[1] != "admin" and r['action'] == "Recorded payment":
+                    d = _re.sub(r"Rs [^ ]+ ", "", d)
+                return d
             tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
-                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
+                         f"<td>{esc(r['action'])}</td><td>{esc(_detail(r))}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
-        if path.startswith("/edit-client/") and path[12:].isdigit():
-            return self.edit_client_page(u, int(path[12:]))
+        if path.startswith("/edit-client/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.edit_client_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/import-clients":
+            if u[1] != "admin":
+                return self.send_html(page("Import clients", u, "<p>Only an admin can import clients.</p>"), 403)
             return self.send_html(page("Import clients", u, """<div class="card">
 <p class="muted">Paste one client per line, comma-separated. Only the name is required — cycle and fee can be left blank and set later (see Clients &rarr; Edit, or the “Save this amount as usual fee” box on a bill).</p>
 <p><b>Columns:</b> name, GSTIN, contact, phone, email, office, cycle, fee<br>
 <span class="muted">Example: Acme Pvt Ltd, 27ABCDE1234F1Z5, Rahul, 9876543210, rahul@acme.com, Office 1, Monthly, 10000</span></p>
 <form method="post" action="/import-clients"><p><textarea name="csv_text" rows="12" style="width:100%" placeholder="Acme Pvt Ltd, 27ABCDE1234F1Z5, Rahul, 9876543210, rahul@acme.com, Office 1"></textarea></p>
 <button>Import clients</button></form></div>"""))
+        if path.startswith("/edit-bill/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.edit_bill_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/change-password":
             return self.send_html(page("Change password", u, """
 <form method="post" action="/change-password">
@@ -313,8 +323,12 @@ password your admin gave you, then set your own here.</p>"""))
             SESSIONS.pop(self.headers.get("Cookie", "").split("session=")[-1].split(";")[0], None)
             return self.redirect("/login")
         if path == "/export.csv":
+            if u[1] != "admin":
+                return self.send_html(page("Export", u, "<p>Only an admin can export.</p>"), 403)
             return self.export_csv()
         if path == "/export.xlsx":
+            if u[1] != "admin":
+                return self.send_html(page("Export", u, "<p>Only an admin can export.</p>"), 403)
             return self.export_xlsx()
         if path.startswith("/bills/") and path[7:].isdigit():
             return self.bill_detail_page(u, int(path[7:]))
@@ -355,6 +369,17 @@ password your admin gave you, then set your own here.</p>"""))
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td class='amt'>&#8377;{r['total']:,.2f}</td>"
                      f"<td>{badge(r['status'])}</td></tr>" for r in recent)
+        if u[1] != "admin":
+            from collections import Counter as _C
+            sc = _C(b["status"] for b in bills)
+            str_ = "".join(f"<tr><td>{esc(k)}</td><td>{v}</td></tr>" for k, v in sorted(sc.items()))
+            str_recent = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td><td>{esc(r['period_label'])}</td><td>{badge(r['status'])}</td></tr>" for r in recent)
+            self.send_html(page("Dashboard", u, f"""<div class="card"><b>Bills by status</b>
+<table><tr><th>Status</th><th>Count</th></tr>{str_}</table>
+<p class="muted">Staff view: bill status only — totals and amounts are shown to admin only.</p></div>
+<div class="card"><b>Recent bills</b>
+<table><tr><th>Bill</th><th>Client</th><th>Period</th><th>Status</th></tr>{str_recent}</table></div>"""))
+            return
         body = f"""<div class="kpis">
 <div class="kpi"><span>Active clients</span><b>{clients}</b></div>
 <div class="kpi"><span>Total billed</span><b>&#8377;{billed:,.2f}</b></div>
@@ -379,7 +404,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         tr = "".join(f"<tr><td>{esc(r['name'])}</td><td>{esc(r['gstin'])}</td>"
                      f"<td>{esc(r['office'])}</td><td>{esc(r['cycle'])}</td>"
-                     f"<td>&#8377;{r['fee']:,.2f}</td><td>{'Yes' if r['active'] else 'No'}</td>"
+                     f"{'<td>&#8377;' + format(r['fee'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{'Yes' if r['active'] else 'No'}</td>"
                      f"<td><a href='/edit-client/{r['id']}'>Edit</a></td></tr>"
                      for r in rows)
         body = f"""<form method="post" action="/clients"><p>
@@ -392,7 +417,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <select name="cycle">{''.join(f'<option>{c}</option>' for c in CYCLES)}</select>
 <input name="fee" type="number" step="0.01" placeholder="Usual fee">
 <button>Add client</button></p></form>
-<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th><th>Fee</th><th>Active</th><th></th></tr>{tr}</table><p class="muted">Cycle and fee are optional when a client is added. Set them later with Edit, or tick “Save this amount as usual fee” when you make the client’s first bill — from then on that amount is pre-filled for new bills.</p>"""
+<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th>{'<th>Fee</th>' if u[1] == 'admin' else ''}<th>Active</th><th></th></tr>{tr}</table><p class="muted">Cycle and fee are optional when a client is added. Set them later with Edit, or tick “Save this amount as usual fee” when you make the client’s first bill — from then on that amount is pre-filled for new bills.</p>"""
         self.send_html(page("Clients", u, body))
 
     def bills_page(self, u, qs):
@@ -413,7 +438,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             rows = [r for r in rows if (r["issued_by"] or "") == firm_filter]
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
-                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td></tr>" for r in rows)
+                     f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td><td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
             rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
@@ -434,7 +459,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select>
 <select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th><th>Created by</th><th>Issued by</th></tr>{tr}</table>
+<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th><th></th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -474,6 +499,14 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
         paid = r["amount_paid"] or 0
         balance = r["total"] - paid
+        if u[1] != "admin":
+            self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
+<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
+<div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
+<div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
+<p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
+<p class="muted">Staff view: status only. Amounts are shown to admin only.</p></div>"""))
+            return
         body = f"""<div class="card"><div class="invoice-head"><div>
 <h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
@@ -515,6 +548,27 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <button>Save client</button></p></form>
 <p class="muted">Set the billing cycle and usual fee here the first time, and the fee will be pre-filled on future bills for this client.</p>"""
         self.send_html(page("Edit client", u, body))
+
+    def edit_bill_page(self, u, bid):
+        con = db()
+        r = con.execute("""SELECT b.*, c.name AS cname FROM bills b JOIN clients c ON c.id=b.client_id WHERE b.id=?""", (bid,)).fetchone()
+        con.close()
+        if not r:
+            return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
+        opts = "".join(f"<option {'selected' if st == r['status'] else ''}>{st}</option>" for st in STATUSES)
+        body = f"""<form method="post" action="/bill-edit"><input type="hidden" name="id" value="{bid}"><p>
+Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
+<input name="period_label" value="{esc(r['period_label'])}" required>
+<input name="bill_date" type="date" value="{esc(r['bill_date'])}" required>
+<input name="due_date" type="date" value="{esc(r['due_date']) or ''}">
+<input name="amount" type="number" step="0.01" value="{r['amount']}" required>
+<input name="gst_percent" type="number" step="0.01" value="{r['gst_percent']}">
+<select name="status">{opts}</select>
+<input name="issued_by" value="{esc(r['issued_by'] or '')}" placeholder="Issued by (firm name)">
+<input name="notes" value="{esc(r['notes'])}" placeholder="Notes">
+<button>Save bill</button></p></form>
+<p class="muted">Changing the amount recalculates the total with the GST % above.</p>"""
+        self.send_html(page("Edit bill", u, body))
 
     def users_page(self, u):
         if u[1] != "admin":
@@ -619,13 +673,19 @@ it on the Change password page straight away.</p>"""
             con = db()
             rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
             con.close()
+            import re as _re
+            def _detail(r):
+                d = r['detail']
+                if u[1] != "admin" and r['action'] == "Recorded payment":
+                    d = _re.sub(r"Rs [^ ]+ ", "", d)
+                return d
             tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
-                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
+                         f"<td>{esc(r['action'])}</td><td>{esc(_detail(r))}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
-        if path.startswith("/edit-client/") and path[12:].isdigit():
-            return self.edit_client_page(u, int(path[12:]))
+        if path.startswith("/edit-client/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.edit_client_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/change-password":
             if check_pw(u[0], f.get("current", "")) is None:
                 return self.send_html(page("Change password", u, "<p class='red'>Current password is wrong.</p>"), 401)
@@ -651,6 +711,16 @@ it on the Change password page straight away.</p>"""
             return self.redirect(f"/bills/{f['bill_id']}")
         con = db()
         try:
+            if path == "/bill-edit":
+                amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
+                con.execute("""UPDATE bills SET period_label=?, bill_date=?, due_date=?, amount=?, gst_percent=?,
+                    total=?, status=?, notes=?, issued_by=? WHERE id=?""",
+                    (f["period_label"], f["bill_date"], f.get("due_date") or None, amt, gst,
+                     round(amt * (1 + gst / 100), 2), f.get("status", "Draft"), f.get("notes", ""),
+                     f.get("issued_by", ""), int(f["id"])))
+                log_action(con, u[0], "Edited bill", f"Bill id {f['id']}")
+                con.commit(); con.close()
+                return self.redirect("/bills")
             if path == "/client-edit":
                 con.execute("""UPDATE clients SET name=?, gstin=?, contact=?, phone=?, email=?, office=?, cycle=?, fee=?
                     WHERE id=?""",
