@@ -89,14 +89,14 @@ def init_db():
             id {id_type}, name TEXT NOT NULL, gstin TEXT,
             contact TEXT, phone TEXT, email TEXT, office TEXT,
             cycle TEXT NOT NULL DEFAULT 'Monthly', fee REAL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1)""",
+            active INTEGER NOT NULL DEFAULT 1, created_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS bills (
             id {id_type}, bill_no TEXT UNIQUE NOT NULL,
             client_id INTEGER NOT NULL REFERENCES clients(id),
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT)""",
+            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT, created_at TEXT)""",
     ]:
         con.execute(stmt)
     # Commit the base tables first. On PostgreSQL a failed statement
@@ -111,6 +111,8 @@ def init_db():
         "ALTER TABLE bills ADD COLUMN amount_paid REAL DEFAULT 0",
         "ALTER TABLE clients ADD COLUMN created_by TEXT",
         "ALTER TABLE bills ADD COLUMN issued_by TEXT",
+        "ALTER TABLE bills ADD COLUMN created_at TEXT",
+        "ALTER TABLE clients ADD COLUMN created_at TEXT",
     ]:
         try:
             con.execute(alter)
@@ -131,9 +133,8 @@ def init_db():
 
 
 def log_action(con, username, action, detail=""):
-    from datetime import datetime
     con.execute("INSERT INTO audit_log (at, username, action, detail) VALUES (?,?,?,?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M"), username, action, detail))
+                (now_ist().strftime("%Y-%m-%d %H:%M"), username, action, detail))
 
 
 def check_pw(username, password):
@@ -167,6 +168,26 @@ def next_bill_no(con):
 
 def esc(x):
     return html.escape("" if x is None else str(x))
+
+
+def now_ist():
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        from datetime import timedelta
+        return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+
+def fmt_ts(ts):
+    if not ts:
+        return "-"
+    try:
+        from datetime import datetime
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M").strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return str(ts)
 
 
 def badge(status):
@@ -288,7 +309,7 @@ Password <input type="password" name="password" required></p>
             con.close()
             if u[1] != "admin":
                 rows = [r for r in rows if r["username"] == u[0]]
-            tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
+            tr = "".join(f"<tr><td>{fmt_ts(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
                          f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
@@ -402,9 +423,10 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con = db()
         rows = con.execute("SELECT * FROM clients ORDER BY name").fetchall()
         con.close()
-        tr = "".join(f"<tr><td>{esc(r['name'])}</td><td>{esc(r['gstin'])}</td>"
+        tr = "".join(f"<tr><td><a href='/clients/{r['id']}'>{esc(r['name'])}</a></td><td>{esc(r['gstin'])}</td>"
                      f"<td>{esc(r['office'])}</td><td>{esc(r['cycle'])}</td>"
                      f"{'<td>&#8377;' + format(r['fee'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{'Yes' if r['active'] else 'No'}</td>"
+                     f"{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}"
                      f"<td>{'<a href=\'/edit-client/' + str(r['id']) + '\'>Edit</a>' if u[1] == 'admin' or r['created_by'] == u[0] else ''}</td></tr>"
                      for r in rows)
         body = f"""<form method="post" action="/clients"><p>
@@ -417,7 +439,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <select name="cycle">{''.join(f'<option>{c}</option>' for c in CYCLES)}</select>
 <input name="fee" type="number" step="0.01" placeholder="Usual fee">
 <button>Add client</button></p></form>
-<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th>{'<th>Fee</th>' if u[1] == 'admin' else ''}<th>Active</th><th></th></tr>{tr}</table><p class="muted">Cycle and fee are optional when a client is added. Set them later with Edit, or tick “Save this amount as usual fee” when you make the client’s first bill — from then on that amount is pre-filled for new bills.</p>"""
+<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th>{'<th>Fee</th>' if u[1] == 'admin' else ''}<th>Active</th>{'<th>Added</th>' if u[1] == 'admin' else ''}<th></th></tr>{tr}</table><p class="muted">Cycle and fee are optional when a client is added. Set them later with Edit, or tick “Save this amount as usual fee” when you make the client’s first bill — from then on that amount is pre-filled for new bills.</p>"""
         self.send_html(page("Clients", u, body))
 
     def bills_page(self, u, qs):
@@ -442,7 +464,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             rows = [r for r in rows if (r["issued_by"] or "") == firm_filter]
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
-                     f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td><td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
+                     f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td>{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}<td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
             rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
@@ -463,7 +485,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select>
 <select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th><th></th></tr>{tr}</table>
+<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -509,7 +531,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
 <h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
-<div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
+<div>Due date: {esc(r['due_date']) or '-'}</div><div>Put in: {fmt_ts(r['created_at'])}</div></div></div>
 <p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
 <table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
 <tr><td>Professional services — {esc(r['period_label'])}<br><span class="muted">{esc(r['notes'])}</span></td>
@@ -531,7 +553,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         body = f"""<div class="card"><div class="invoice-head"><div>
 <h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
-<div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
+<div>Due date: {esc(r['due_date']) or '-'}</div><div>Put in: {fmt_ts(r['created_at'])}</div></div></div>
 <p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
 <table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
 <tr><td>Professional services — {esc(r['period_label'])}<br><span class="muted">{esc(r['notes'])}</span></td>
@@ -566,14 +588,14 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['period_label'])}</td>"
                      f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
                      f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
-                     f"<td>{esc(b['issued_by'] or '')}</td></tr>" for b in bills)
+                     f"<td>{esc(b['issued_by'] or '')}</td><td>{fmt_ts(b['created_at'])}</td></tr>" for b in bills)
         scope = "Your bills for this client only." if u[1] != "admin" else "All bills for this client."
         edit = f"<a href='/edit-client/{cid}'>Edit client</a>" if u[1] == "admin" or c["created_by"] == u[0] else ""
         body = f"""<div class="card"><h2>{esc(c['name'])}</h2>
 <p>{esc(c['gstin'])}<br>{esc(c['contact'])} {esc(c['phone'])} {esc(c['email'])}<br>Office: {esc(c['office'])} | Cycle: {esc(c['cycle'])} | Usual fee: &#8377;{c['fee']:,.2f}</p>
 <p>{edit}</p></div>
 <div class="card"><b>Bills for this client</b> <span class="muted">{scope}</span>
-<table><tr><th>Bill</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th></tr>{tr}</table>
+<table><tr><th>Bill</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
 <table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid:,.2f}</b></td></tr></table>
@@ -631,7 +653,21 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
         con = db()
         rows = con.execute("SELECT username, role FROM users ORDER BY username").fetchall()
         con.close()
-        tr = "".join(f"<tr><td>{esc(r['username'])}</td><td>{esc(r['role'])}</td></tr>" for r in rows)
+        def _row(r):
+            uname = esc(r['username'])
+            if r['username'] == u[0]:
+                actions = "<span class='muted'>This is you — use Change password for your own password, and you cannot remove yourself.</span>"
+            else:
+                actions = (f"<form method='post' action='/reset-password' style='display:inline'>"
+                           f"<input type='hidden' name='username' value='{uname}'>"
+                           f"<input name='password' type='password' placeholder='New password' required> "
+                           f"<input name='confirm' type='password' placeholder='Type again' required> "
+                           f"<button>Change password</button></form> "
+                           f"<form method='post' action='/delete-user' style='display:inline' onsubmit=\"return confirm('Remove {uname}? Their bills, clients and activity stay in the tracker under their name — only their login stops working.')\">"
+                           f"<input type='hidden' name='username' value='{uname}'>"
+                           f"<button>Remove</button></form>")
+            return f"<tr><td>{uname}</td><td>{esc(r['role'])}</td><td>{actions}</td></tr>"
+        tr = "".join(_row(r) for r in rows)
         body = f"""<form method="post" action="/users"><p>
 <input name="username" placeholder="New staff username" required>
 <input name="password" id="pw1" type="password" placeholder="Password" required>
@@ -640,7 +676,8 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('pw1').value);this.textContent='Copied!'">Copy password</button>
 <select name="role"><option>staff</option><option>admin</option></select>
 <button>Add user</button></p></form>
-<table><tr><th>Username</th><th>Role</th></tr>{tr}</table>
+<table><tr><th>Username</th><th>Role</th><th>Actions</th></tr>{tr}</table>
+<p><b>Removing a staff member only stops their login.</b> Their bills, clients and activity stay in the tracker under their name, so nothing they put in is lost when they leave.</p>
 <p>Give each staff member their own username with a temporary password.
 On first login they open <b>Change password</b> (left menu) and set their
 own password. The first admin login is <b>admin / admin123</b> — change
@@ -730,7 +767,7 @@ it on the Change password page straight away.</p>"""
             con.close()
             if u[1] != "admin":
                 rows = [r for r in rows if r["username"] == u[0]]
-            tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
+            tr = "".join(f"<tr><td>{fmt_ts(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
                          f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
@@ -767,6 +804,36 @@ it on the Change password page straight away.</p>"""
             return self.redirect(f"/bills/{f['bill_id']}")
         con = db()
         try:
+            if path == "/reset-password" and u[1] == "admin":
+                if f.get("password") != f.get("confirm", "") or len(f.get("password", "")) < 8:
+                    con.close()
+                    return self.send_html(page("Error", u, "<p>New passwords do not match, or are shorter than 8 characters.</p>"), 400)
+                salt = secrets.token_hex(16)
+                h = hashlib.pbkdf2_hmac("sha256", f["password"].encode(), salt.encode(), 100000).hex()
+                con.execute("UPDATE users SET pass_hash=?, salt=? WHERE username=?", (h, salt, f["username"]))
+                log_action(con, u[0], "Changed user password", f["username"])
+                con.commit(); con.close()
+                return self.redirect("/users")
+            if path == "/delete-user" and u[1] == "admin":
+                target = f["username"]
+                if target == u[0]:
+                    con.close()
+                    return self.send_html(page("Error", u, "<p>You cannot remove your own login.</p>"), 400)
+                row = con.execute("SELECT role FROM users WHERE username=?", (target,)).fetchone()
+                if not row:
+                    con.close()
+                    return self.send_html(page("Error", u, "<p>No such user.</p>"), 404)
+                if row["role"] == "admin" and con.execute("SELECT COUNT(*) c FROM users WHERE role='admin'").fetchone()["c"] <= 1:
+                    con.close()
+                    return self.send_html(page("Error", u, "<p>Cannot remove the only admin.</p>"), 400)
+                # Only the login is removed. Bills, clients and activity keep
+                # created_by / username as plain text, so nothing they put in is deleted.
+                con.execute("DELETE FROM users WHERE username=?", (target,))
+                log_action(con, u[0], "Removed user", target)
+                con.commit(); con.close()
+                for tok in [t for t, v in list(SESSIONS.items()) if v[0] == target]:
+                    SESSIONS.pop(tok, None)
+                return self.redirect("/users")
             if path == "/bill-edit":
                 if u[1] != "admin":
                     _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["id"]),)).fetchone()
@@ -814,9 +881,9 @@ it on the Change password page straight away.</p>"""
                     cycle = vals[6] if vals[6] in CYCLES else "Monthly"
                     try: fee = float(vals[7]) if vals[7] else 0
                     except ValueError: fee = 0
-                    con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by)
-                        VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (name, gstin, vals[2], vals[3], vals[4], vals[5], cycle, fee, u[0]))
+                    con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by, created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (name, gstin, vals[2], vals[3], vals[4], vals[5], cycle, fee, u[0], now_ist().strftime("%Y-%m-%d %H:%M")))
                     existing.add(name.lower())
                     if gstin: existing_gstin.add(gstin)
                     added += 1
@@ -824,20 +891,21 @@ it on the Change password page straight away.</p>"""
                 con.commit(); con.close()
                 return self.send_html(page("Import clients", u, f"<p><b>{added} clients added, {skipped} skipped</b> (already present). Cycle and fee were left as given, or Monthly / 0 where blank — set them later on Clients &rarr; Edit, or via a first bill.</p><p><a href='/clients'>Back to Clients</a></p>"))
             if path == "/clients":
-                con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by)
-                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (f["name"], f.get("gstin", ""), f.get("contact", ""), f.get("phone", ""),
                      f.get("email", ""), f.get("office", ""), f.get("cycle", "Monthly"),
-                     float(f.get("fee") or 0), u[0]))
+                     float(f.get("fee") or 0), u[0], now_ist().strftime("%Y-%m-%d %H:%M")))
                 log_action(con, u[0], "Added client", f["name"])
             elif path == "/bills":
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
-                    amount, gst_percent, total, status, notes, created_by, issued_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
-                     f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", "")))
+                     f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", ""),
+                     now_ist().strftime("%Y-%m-%d %H:%M")))
                 if f.get("remember_fee"):
                     con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
