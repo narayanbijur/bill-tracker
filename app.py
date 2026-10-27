@@ -292,8 +292,9 @@ Password <input type="password" name="password" required></p>
             return self.send_html(page("Change password", u, """
 <form method="post" action="/change-password">
 <p>Current password <input type="password" name="current" required></p>
-<p>New password <input type="password" name="new" required></p>
-<p>Confirm new password <input type="password" name="confirm" required></p>
+<p>New password <input type="password" id="npw1" name="new" required></p>
+<p>Confirm new password <input type="password" id="npw2" name="confirm" required></p>
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" onclick="var a=document.getElementById('npw1'),b=document.getElementById('npw2');a.type=b.type=this.checked?'text':'password'"> Show password</label>
 <button>Change password</button></form>
 <p class="muted">Use this on your first login too: log in with the temporary
 password your admin gave you, then set your own here.</p>"""))
@@ -479,7 +480,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         tr = "".join(f"<tr><td>{esc(r['username'])}</td><td>{esc(r['role'])}</td></tr>" for r in rows)
         body = f"""<form method="post" action="/users"><p>
 <input name="username" placeholder="New staff username" required>
-<input name="password" type="password" placeholder="Password" required>
+<input name="password" id="pw1" type="password" placeholder="Password" required>
+<input name="confirm" id="pw2" type="password" placeholder="Type password again" required>
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" onclick="var a=document.getElementById('pw1'),b=document.getElementById('pw2');a.type=b.type=this.checked?'text':'password'"> Show password</label>
 <select name="role"><option>staff</option><option>admin</option></select>
 <button>Add user</button></p></form>
 <table><tr><th>Username</th><th>Role</th></tr>{tr}</table>
@@ -581,6 +584,9 @@ it on the Change password page straight away.</p>"""
                 con.execute("UPDATE bills SET status=? WHERE bill_no=?", (f["status"], f["bill_no"]))
                 log_action(con, u[0], "Changed bill status", f"{f['bill_no']} -> {f['status']}")
             elif path == "/users" and u[1] == "admin":
+                if f.get("password") != f.get("confirm", ""):
+                    con.close()
+                    return self.send_html(page("Error", u, "<p>Passwords do not match. Go back and type the password again.</p>"), 400)
                 salt = secrets.token_hex(16)
                 h = hashlib.pbkdf2_hmac("sha256", f["password"].encode(), salt.encode(), 100000).hex()
                 con.execute("INSERT INTO users (username, pass_hash, salt, role) VALUES (?,?,?,?)",
