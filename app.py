@@ -310,8 +310,7 @@ class H(BaseHTTPRequestHandler):
             return self.send_html(page("Login", None, """
 <form method="post" action="/login"><p>Username <input name="username" required>
 Password <input type="password" name="password" required></p>
-<button>Login</button></form>
-<p>First login: <b>admin / admin123</b> — change it on the Users page.</p>"""))
+<button>Login</button></form>"""))
         if not u:
             return self.redirect("/login")
         if path in ("/", "/dashboard"):
@@ -760,9 +759,7 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <button>Reassign all bills and clients</button></p></form>
 <p><b>Removing a staff member only stops their login.</b> Their bills, clients and activity stay in the tracker under their name, so nothing they put in is lost when they leave.</p>
 <p>Give each staff member their own username with a password you set here.
-Staff cannot change their own password — only an admin can, from this page.
-The first admin login is <b>admin / admin123</b> — change
-it on the Change password page straight away.</p>"""
+Staff cannot change their own password — only an admin can, from this page.</p>"""
         self.send_html(page("Users", u, body))
 
     def export_csv(self):
