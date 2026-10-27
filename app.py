@@ -366,12 +366,12 @@ password your admin gave you, then set your own here.</p>"""))
             SESSIONS.pop(self.headers.get("Cookie", "").split("session=")[-1].split(";")[0], None)
             return self.redirect("/login")
         if path == "/export.csv":
-            if u[1] != "admin":
-                return self.send_html(page("Export", u, "<p>Only an admin can export.</p>"), 403)
+            if u[1] != "admin" and u[0].lower() != "backup":
+                return self.send_html(page("Export", u, "<p>Only an admin or the Backup user can export.</p>"), 403)
             return self.export_csv()
         if path == "/export.xlsx":
-            if u[1] != "admin":
-                return self.send_html(page("Export", u, "<p>Only an admin can export.</p>"), 403)
+            if u[1] != "admin" and u[0].lower() != "backup":
+                return self.send_html(page("Export", u, "<p>Only an admin or the Backup user can export.</p>"), 403)
             return self.export_xlsx()
         if path.startswith("/bills/") and path[7:].isdigit():
             return self.bill_detail_page(u, int(path[7:]))
@@ -805,11 +805,11 @@ Staff cannot change their own password — only an admin can, from this page.</p
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         clients = con.execute("SELECT * FROM clients ORDER BY name").fetchall()
         activity = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").fetchall()
+        pays = con.execute("""SELECT b.bill_no, c.name, p.pay_date, p.amount, p.mode, p.note, p.recorded_by, p.final_settlement
+            FROM payments p JOIN bills b ON b.id=p.bill_id JOIN clients c ON c.id=b.client_id ORDER BY p.id""").fetchall()
         con.close()
         sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by", "Heading"],
               bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by", "heading"])
-        pays = con.execute("""SELECT b.bill_no, c.name, p.pay_date, p.amount, p.mode, p.note, p.recorded_by, p.final_settlement
-            FROM payments p JOIN bills b ON b.id=p.bill_id JOIN clients c ON c.id=b.client_id ORDER BY p.id""").fetchall()
         sheet("Payments", ["Bill no", "Client", "Date", "Amount", "Mode", "Note", "Recorded by", "Final settlement"],
               pays, ["bill_no", "name", "pay_date", "amount", "mode", "note", "recorded_by", "final_settlement"])
         sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
