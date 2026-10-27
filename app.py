@@ -165,6 +165,17 @@ def current_period(cycle, today=None):
     return ""
 
 
+def fiscal_year(dstr):
+    """Indian fiscal year for a YYYY-MM-DD date, e.g. 2026-04-01 -> '2026-27'."""
+    try:
+        y, m = int(dstr[:4]), int(dstr[5:7])
+    except Exception:
+        return ""
+    if m >= 4:
+        return f"{y}-{str(y + 1)[-2:]}"
+    return f"{y - 1}-{str(y)[-2:]}"
+
+
 def firm_code(issued_by):
     if not issued_by:
         return ""
@@ -404,6 +415,10 @@ password your admin gave you, then set your own here.</p>"""))
         mx = max(by_period.values()) if by_period else 1
         bars = "".join(f"<div class='bar-wrap'><div class='bar' style='height:{by_period[pp]/mx*100:.0f}%'></div>{esc(pp)}<br>&#8377;{by_period[pp]:,.0f}</div>" for pp in periods)
         top_tr = "".join(f"<tr><td>{esc(r['n'])}</td><td class='amt'>&#8377;{r['t']:,.2f}</td></tr>" for r in top)
+        by_fy = defaultdict(float)
+        for b in _money:
+            by_fy[fiscal_year(b["bill_date"])] += b["total"]
+        fy_tr = "".join(f"<tr><td>{esc(k or '(no date)')}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in sorted(by_fy.items(), reverse=True) if k)
         today = _d.today().isoformat()
         aging = {"0-30 days": 0, "31-60 days": 0, "60+ days": 0}
         for b in _money:
@@ -442,6 +457,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <table><tr><th>Client</th><th style="text-align:right">Billed</th></tr>{top_tr}</table></div>
 <div class="card"><b>Overdue ageing (unpaid, past due date)</b>
 <table><tr><th>Age</th><th style="text-align:right">Outstanding</th></tr>{aging_tr}</table></div>
+<div class="card"><b>Billed by fiscal year</b>
+<table><tr><th>Fiscal year</th><th style="text-align:right">Billed</th></tr>{fy_tr}</table></div>
 <div class="card"><b>Billed by firm name</b>
 <table><tr><th>Firm</th><th style="text-align:right">Billed</th></tr>{"".join(f"<tr><td>{esc(k or '(not set)')}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in sorted(((lambda d: d)(__import__('collections').defaultdict(float, {kk: sum(b['total'] for b in _money if (b['issued_by'] or '') == kk) for kk in {bb['issued_by'] or '' for bb in _money}}))).items(), key=lambda x: -x[1]))}</table></div>
 <div class="card"><b>Recent bills</b>
@@ -494,8 +511,12 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         kind_filter = qs.get("kind", [""])[0]
         if kind_filter:
             rows = [r for r in rows if (r["bill_kind"] or "Final") == kind_filter]
+        fy_filter = qs.get("fy", [""])[0]
+        if fy_filter:
+            rows = [r for r in rows if fiscal_year(r["bill_date"]) == fy_filter]
+        fy_opts = "".join(f"<option {'selected' if f == fy_filter else ''}>{f}</option>" for f in sorted({fiscal_year(r["bill_date"]) for r in rows if fiscal_year(r["bill_date"])}, reverse=True))
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
-                     f"<td>{esc(r['bill_kind'] or 'Final')}</td><td>{esc(r['heading'] or '')}</td><td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
+                     f"<td>{esc(r['bill_kind'] or 'Final')}</td><td>{esc(r['heading'] or '')}</td><td>{esc(r['period_label'])}</td><td>{fiscal_year(r['bill_date'])}</td><td>{esc(r['bill_date'])}</td>"
                      f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td>{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}<td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
@@ -519,8 +540,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <form method="get"><input name="search" placeholder="Search bill no., client or heading" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select>
 <select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select>
+<select name="fy" onchange="this.form.submit()"><option value="">All fiscal years</option>{fy_opts}</select>
 <select name="kind" onchange="this.form.submit()"><option value="">All kinds</option><option {'selected' if qs.get("kind", [""])[0] == 'Final' else ''}>Final</option><option {'selected' if qs.get("kind", [""])[0] == 'Pro forma' else ''}>Pro forma</option></select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Kind</th><th>Heading</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
+<table><tr><th>Bill no.</th><th>Client</th><th>Kind</th><th>Heading</th><th>Period</th><th>Fiscal year</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -575,7 +597,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <p class="muted">GST portion of a payment (at { _gst_rate:.0f}%): amount x {_gst_rate:.0f} / (100 + {_gst_rate:.0f}). For a part payment, that is the part-bill GST for that payment.</p></div>"""
         if u[1] != "admin":
             self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Fiscal year: {fiscal_year(r['bill_date'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
 {'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
@@ -608,7 +630,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""))
             return
         body = f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+<h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Fiscal year: {fiscal_year(r['bill_date'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
 {'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
@@ -656,7 +678,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         paid = sum(b["amount_paid"] or 0 for b in _money)
         settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in _money if b["status"] in ("Settled", "Balance billed"))
         proforma_total = sum(b["total"] for b in bills if (b["bill_kind"] or "Final") == "Pro forma")
-        tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['heading'] or '')}</td><td>{esc(b['period_label'])}</td>"
+        tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['heading'] or '')}</td><td>{esc(b['period_label'])}</td><td>{fiscal_year(b['bill_date'])}</td>"
                      f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
                      f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
                      f"<td>{esc(b['issued_by'] or '')}</td><td>{fmt_ts(b['created_at'])}</td></tr>" for b in bills)
@@ -666,7 +688,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <p>{esc(c['gstin'])}<br>{esc(c['contact'])} {esc(c['phone'])} {esc(c['email'])}<br>Office: {esc(c['office'])} | Cycle: {esc(c['cycle'])} | Usual fee: &#8377;{c['fee']:,.2f}</p>
 <p>{edit}</p></div>
 <div class="card"><b>Bills for this client</b> <span class="muted">{scope}</span>
-<table><tr><th>Bill</th><th>Heading</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
+<table><tr><th>Bill</th><th>Heading</th><th>Period</th><th>Fiscal year</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
 <table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td>Settled / written off for this client</td><td class="amt">&#8377;{settled_writeoff:,.2f}</td></tr>
@@ -766,13 +788,14 @@ Staff cannot change their own password — only an admin can, from this page.</p
         import csv, io
         con = db()
         rows = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date,
-            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes, b.issued_by, b.heading
+            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes, b.issued_by, b.heading, b.bill_date
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         con.close()
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes", "Issued by", "Heading"])
-        cols = ["bill_no", "name", "period_label", "bill_date", "due_date",
+        w.writerow(["Bill no", "Client", "Period", "Fiscal year", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes", "Issued by", "Heading"])
+        rows = [dict(r, _fy=fiscal_year(r["bill_date"])) for r in rows]
+        cols = ["bill_no", "name", "period_label", "_fy", "bill_date", "due_date",
                 "amount", "gst_percent", "total", "status", "notes", "issued_by", "heading"]
         w.writerows([[r[c] for c in cols] for r in rows])
         data = buf.getvalue().encode()
@@ -808,8 +831,9 @@ Staff cannot change their own password — only an admin can, from this page.</p
         pays = con.execute("""SELECT b.bill_no, c.name, p.pay_date, p.amount, p.mode, p.note, p.recorded_by, p.final_settlement
             FROM payments p JOIN bills b ON b.id=p.bill_id JOIN clients c ON c.id=b.client_id ORDER BY p.id""").fetchall()
         con.close()
-        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by", "Heading"],
-              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by", "heading"])
+        bills = [dict(b, _fy=fiscal_year(b["bill_date"])) for b in bills]
+        sheet("Bills", ["Bill no", "Client", "Period", "Fiscal year", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by", "Heading"],
+              bills, ["bill_no", "name", "period_label", "_fy", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by", "heading"])
         sheet("Payments", ["Bill no", "Client", "Date", "Amount", "Mode", "Note", "Recorded by", "Final settlement"],
               pays, ["bill_no", "name", "pay_date", "amount", "mode", "note", "recorded_by", "final_settlement"])
         sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
