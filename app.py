@@ -99,14 +99,24 @@ def init_db():
             notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0)""",
     ]:
         con.execute(stmt)
-    try:
-        con.execute("ALTER TABLE bills ADD COLUMN amount_paid REAL DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        con.execute("ALTER TABLE clients ADD COLUMN created_by TEXT")
-    except Exception:
-        pass
+    # Commit the base tables first. On PostgreSQL a failed statement
+    # aborts the whole transaction, so the ALTERs below (which fail
+    # on a fresh database, where the columns already exist in the
+    # CREATE TABLE above) must run in their own transactions —
+    # otherwise the audit_log CREATE after them crashes with
+    # InFailedSqlTransaction, which is exactly what broke the
+    # first Neon deploy.
+    con.commit()
+    for alter in [
+        "ALTER TABLE bills ADD COLUMN amount_paid REAL DEFAULT 0",
+        "ALTER TABLE clients ADD COLUMN created_by TEXT",
+    ]:
+        try:
+            con.execute(alter)
+            con.commit()
+        except Exception:
+            if con.is_pg:
+                con.raw.rollback()
     con.execute(f"""CREATE TABLE IF NOT EXISTS audit_log (
         id {id_type}, at TEXT NOT NULL, username TEXT NOT NULL,
         action TEXT NOT NULL, detail TEXT)""")
