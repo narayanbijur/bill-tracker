@@ -284,6 +284,8 @@ Password <input type="password" name="password" required></p>
             con = db()
             rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
             con.close()
+            if u[1] != "admin":
+                rows = [r for r in rows if r["username"] == u[0]]
             import re as _re
             def _detail(r):
                 d = r['detail']
@@ -370,6 +372,8 @@ password your admin gave you, then set your own here.</p>"""))
                      f"<td>{esc(r['period_label'])}</td><td class='amt'>&#8377;{r['total']:,.2f}</td>"
                      f"<td>{badge(r['status'])}</td></tr>" for r in recent)
         if u[1] != "admin":
+            bills = [b for b in bills if b["created_by"] == u[0]]
+            recent = [r for r in recent if r["created_by"] == u[0]]
             from collections import Counter as _C
             sc = _C(b["status"] for b in bills)
             str_ = "".join(f"<tr><td>{esc(k)}</td><td>{v}</td></tr>" for k, v in sorted(sc.items()))
@@ -405,7 +409,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         tr = "".join(f"<tr><td>{esc(r['name'])}</td><td>{esc(r['gstin'])}</td>"
                      f"<td>{esc(r['office'])}</td><td>{esc(r['cycle'])}</td>"
                      f"{'<td>&#8377;' + format(r['fee'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{'Yes' if r['active'] else 'No'}</td>"
-                     f"<td><a href='/edit-client/{r['id']}'>Edit</a></td></tr>"
+                     f"<td>{'<a href=\'/edit-client/' + str(r['id']) + '\'>Edit</a>' if u[1] == 'admin' or r['created_by'] == u[0] else ''}</td></tr>"
                      for r in rows)
         body = f"""<form method="post" action="/clients"><p>
 <input name="name" placeholder="Company / client name" required>
@@ -429,7 +433,11 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         if status:
             sql += " WHERE b.status=?"; args.append(status)
         rows = con.execute(sql + " ORDER BY b.id DESC", args).fetchall()
-        firms = con.execute("SELECT DISTINCT issued_by FROM bills WHERE issued_by<>'' AND issued_by IS NOT NULL ORDER BY issued_by").fetchall()
+        if u[1] != "admin":
+            rows = [r for r in rows if r["created_by"] == u[0]]
+            firms = con.execute("SELECT DISTINCT issued_by FROM bills WHERE issued_by<>'' AND issued_by IS NOT NULL AND created_by=? ORDER BY issued_by", (u[0],)).fetchall()
+        else:
+            firms = con.execute("SELECT DISTINCT issued_by FROM bills WHERE issued_by<>'' AND issued_by IS NOT NULL ORDER BY issued_by").fetchall()
         con.close()
         opts = "".join(f"<option value='{r['id']}' data-fee='{r['fee']}'>{esc(r['name'])}</option>" for r in clients)
         firm_opts = "".join(f"<option>{esc(r['issued_by'])}</option>" for r in firms)
@@ -497,6 +505,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         if not r:
             return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
+        if u[1] != "admin" and r["created_by"] != u[0]:
+            return self.send_html(page("Bill", u, "<p>You can only see bills you put in.</p>"), 403)
         paid = r["amount_paid"] or 0
         balance = r["total"] - paid
         if u[1] != "admin":
@@ -535,6 +545,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         if not r:
             return self.send_html(page("Client not found", u, "<p>No such client.</p>"), 404)
+        if u[1] != "admin" and r["created_by"] != u[0]:
+            return self.send_html(page("Edit client", u, "<p>You can only edit clients you put in.</p>"), 403)
         opts = "".join(f"<option {'selected' if c == r['cycle'] else ''}>{c}</option>" for c in CYCLES)
         body = f"""<form method="post" action="/client-edit"><input type="hidden" name="id" value="{cid}"><p>
 <input name="name" value="{esc(r['name'])}" required>
@@ -555,6 +567,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         if not r:
             return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
+        if u[1] != "admin" and r["created_by"] != u[0]:
+            return self.send_html(page("Edit bill", u, "<p>You can only edit bills you put in.</p>"), 403)
         opts = "".join(f"<option {'selected' if st == r['status'] else ''}>{st}</option>" for st in STATUSES)
         body = f"""<form method="post" action="/bill-edit"><input type="hidden" name="id" value="{bid}"><p>
 Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
@@ -673,6 +687,8 @@ it on the Change password page straight away.</p>"""
             con = db()
             rows = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
             con.close()
+            if u[1] != "admin":
+                rows = [r for r in rows if r["username"] == u[0]]
             import re as _re
             def _detail(r):
                 d = r['detail']
@@ -699,6 +715,8 @@ it on the Change password page straight away.</p>"""
             con.commit(); con.close()
             return self.send_html(page("Password changed", u, "<p><b>Password changed.</b> Use your new password next time you log in. <a href='/dashboard'>Back to Dashboard</a></p>"))
         if path == "/bill-payment":
+            if u[1] != "admin":
+                return self.send_html(page("Record payment", u, "<p>Only an admin can record payments.</p>"), 403)
             con = db()
             r = con.execute("SELECT total, amount_paid FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
             if r:
@@ -712,6 +730,11 @@ it on the Change password page straight away.</p>"""
         con = db()
         try:
             if path == "/bill-edit":
+                if u[1] != "admin":
+                    _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["id"]),)).fetchone()
+                    if not _own or _own["created_by"] != u[0]:
+                        con.close()
+                        return self.send_html(page("Edit bill", u, "<p>You can only edit bills you put in.</p>"), 403)
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""UPDATE bills SET period_label=?, bill_date=?, due_date=?, amount=?, gst_percent=?,
                     total=?, status=?, notes=?, issued_by=? WHERE id=?""",
@@ -722,6 +745,11 @@ it on the Change password page straight away.</p>"""
                 con.commit(); con.close()
                 return self.redirect("/bills")
             if path == "/client-edit":
+                if u[1] != "admin":
+                    _own = con.execute("SELECT created_by FROM clients WHERE id=?", (int(f["id"]),)).fetchone()
+                    if not _own or _own["created_by"] != u[0]:
+                        con.close()
+                        return self.send_html(page("Edit client", u, "<p>You can only edit clients you put in.</p>"), 403)
                 con.execute("""UPDATE clients SET name=?, gstin=?, contact=?, phone=?, email=?, office=?, cycle=?, fee=?
                     WHERE id=?""",
                     (f["name"], f.get("gstin", ""), f.get("contact", ""), f.get("phone", ""),
@@ -776,6 +804,11 @@ it on the Change password page straight away.</p>"""
                     con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
             elif path == "/bill-status":
+                if u[1] != "admin":
+                    _own = con.execute("SELECT created_by FROM bills WHERE bill_no=?", (f["bill_no"],)).fetchone()
+                    if not _own or _own["created_by"] != u[0]:
+                        con.close()
+                        return self.send_html(page("Bill status", u, "<p>You can only change bills you put in.</p>"), 403)
                 con.execute("UPDATE bills SET status=? WHERE bill_no=?", (f["status"], f["bill_no"]))
                 log_action(con, u[0], "Changed bill status", f"{f['bill_no']} -> {f['status']}")
             elif path == "/users" and u[1] == "admin":
