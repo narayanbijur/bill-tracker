@@ -190,7 +190,7 @@ button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4
 <p class="muted">Bills, clients and outstanding amounts — in one place.</p><h2>{esc(title)}</h2>{body}</div></div></body></html>"""
     nav = f"""<aside>
 <div class="brand">Narayan Bijur<br><span>Bill Tracker</span></div>
-<a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/bills">Bills</a>
+<a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/import-clients">Import clients</a><a href="/bills">Bills</a>
 <a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a>
 <a href="/users">Users</a><a href="/activity">Activity — who did what</a><a href="/change-password">Change password</a>
 <a href="/logout">Logout ({esc(user[0])})</a></aside>"""
@@ -288,6 +288,15 @@ Password <input type="password" name="password" required></p>
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
+        if path.startswith("/edit-client/") and path[12:].isdigit():
+            return self.edit_client_page(u, int(path[12:]))
+        if path == "/import-clients":
+            return self.send_html(page("Import clients", u, """<div class="card">
+<p class="muted">Paste one client per line, comma-separated. Only the name is required — cycle and fee can be left blank and set later (see Clients &rarr; Edit, or the “Save this amount as usual fee” box on a bill).</p>
+<p><b>Columns:</b> name, GSTIN, contact, phone, email, office, cycle, fee<br>
+<span class="muted">Example: Acme Pvt Ltd, 27ABCDE1234F1Z5, Rahul, 9876543210, rahul@acme.com, Office 1, Monthly, 10000</span></p>
+<form method="post" action="/import-clients"><p><textarea name="csv_text" rows="12" style="width:100%" placeholder="Acme Pvt Ltd, 27ABCDE1234F1Z5, Rahul, 9876543210, rahul@acme.com, Office 1"></textarea></p>
+<button>Import clients</button></form></div>"""))
         if path == "/change-password":
             return self.send_html(page("Change password", u, """
 <form method="post" action="/change-password">
@@ -364,7 +373,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         tr = "".join(f"<tr><td>{esc(r['name'])}</td><td>{esc(r['gstin'])}</td>"
                      f"<td>{esc(r['office'])}</td><td>{esc(r['cycle'])}</td>"
-                     f"<td>&#8377;{r['fee']:,.2f}</td><td>{'Yes' if r['active'] else 'No'}</td></tr>"
+                     f"<td>&#8377;{r['fee']:,.2f}</td><td>{'Yes' if r['active'] else 'No'}</td>"
+                     f"<td><a href='/edit-client/{r['id']}'>Edit</a></td></tr>"
                      for r in rows)
         body = f"""<form method="post" action="/clients"><p>
 <input name="name" placeholder="Company / client name" required>
@@ -376,7 +386,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <select name="cycle">{''.join(f'<option>{c}</option>' for c in CYCLES)}</select>
 <input name="fee" type="number" step="0.01" placeholder="Usual fee">
 <button>Add client</button></p></form>
-<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th><th>Fee</th><th>Active</th></tr>{tr}</table>"""
+<table><tr><th>Client</th><th>GSTIN</th><th>Office</th><th>Cycle</th><th>Fee</th><th>Active</th><th></th></tr>{tr}</table><p class="muted">Cycle and fee are optional when a client is added. Set them later with Edit, or tick “Save this amount as usual fee” when you make the client’s first bill — from then on that amount is pre-filled for new bills.</p>"""
         self.send_html(page("Clients", u, body))
 
     def bills_page(self, u, qs):
@@ -389,7 +399,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             sql += " WHERE b.status=?"; args.append(status)
         rows = con.execute(sql + " ORDER BY b.id DESC", args).fetchall()
         con.close()
-        opts = "".join(f"<option value='{r['id']}'>{esc(r['name'])}</option>" for r in clients)
+        opts = "".join(f"<option value='{r['id']}' data-fee='{r['fee']}'>{esc(r['name'])}</option>" for r in clients)
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
                      f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td></tr>" for r in rows)
@@ -398,11 +408,12 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
         filt = "".join(f"<option {'selected' if s == status else ''}>{s}</option>" for s in [""] + STATUSES)
         body = f"""<form method="post" action="/bills"><p>
-<select name="client_id" required>{opts}</select>
+<select name="client_id" id="bill_client" required onchange="var o=this.options[this.selectedIndex];var a=document.getElementById('bill_amount');if(o&&o.dataset.fee&&parseFloat(o.dataset.fee)>0)a.value=o.dataset.fee">{opts}</select>
 <input name="period_label" placeholder="Period e.g. 2026-10" required>
 <input name="bill_date" type="date" required>
 <input name="due_date" type="date">
-<input name="amount" type="number" step="0.01" placeholder="Amount (ex-GST)" required>
+<input name="amount" id="bill_amount" type="number" step="0.01" placeholder="Amount (ex-GST)" required>
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="remember_fee"> Save this amount as this client’s usual fee for future bills</label>
 <input name="gst_percent" type="number" step="0.01" value="18" placeholder="GST %">
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
 <input name="notes" placeholder="Notes (service, etc.)">
@@ -470,6 +481,26 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""
         self.send_html(page(f"Invoice {r['bill_no']}", u, body))
+
+    def edit_client_page(self, u, cid):
+        con = db()
+        r = con.execute("SELECT * FROM clients WHERE id=?", (cid,)).fetchone()
+        con.close()
+        if not r:
+            return self.send_html(page("Client not found", u, "<p>No such client.</p>"), 404)
+        opts = "".join(f"<option {'selected' if c == r['cycle'] else ''}>{c}</option>" for c in CYCLES)
+        body = f"""<form method="post" action="/client-edit"><input type="hidden" name="id" value="{cid}"><p>
+<input name="name" value="{esc(r['name'])}" required>
+<input name="gstin" value="{esc(r['gstin'])}" placeholder="GSTIN">
+<input name="contact" value="{esc(r['contact'])}" placeholder="Contact person">
+<input name="phone" value="{esc(r['phone'])}" placeholder="Phone">
+<input name="email" value="{esc(r['email'])}" placeholder="Email">
+<input name="office" value="{esc(r['office'])}" placeholder="Office">
+<select name="cycle">{opts}</select>
+<input name="fee" type="number" step="0.01" value="{r['fee']}" placeholder="Usual fee">
+<button>Save client</button></p></form>
+<p class="muted">Set the billing cycle and usual fee here the first time, and the fee will be pre-filled on future bills for this client.</p>"""
+        self.send_html(page("Edit client", u, body))
 
     def users_page(self, u):
         if u[1] != "admin":
@@ -539,6 +570,8 @@ it on the Change password page straight away.</p>"""
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
+        if path.startswith("/edit-client/") and path[12:].isdigit():
+            return self.edit_client_page(u, int(path[12:]))
         if path == "/change-password":
             if check_pw(u[0], f.get("current", "")) is None:
                 return self.send_html(page("Change password", u, "<p class='red'>Current password is wrong.</p>"), 401)
@@ -564,6 +597,42 @@ it on the Change password page straight away.</p>"""
             return self.redirect(f"/bills/{f['bill_id']}")
         con = db()
         try:
+            if path == "/client-edit":
+                con.execute("""UPDATE clients SET name=?, gstin=?, contact=?, phone=?, email=?, office=?, cycle=?, fee=?
+                    WHERE id=?""",
+                    (f["name"], f.get("gstin", ""), f.get("contact", ""), f.get("phone", ""),
+                     f.get("email", ""), f.get("office", ""), f.get("cycle", "Monthly"),
+                     float(f.get("fee") or 0), int(f["id"])))
+                log_action(con, u[0], "Updated client", f["name"] + " (cycle/fee set)")
+                con.commit(); con.close()
+                return self.redirect("/clients")
+            if path == "/import-clients":
+                if u[1] != "admin":
+                    con.close()
+                    return self.send_html(page("Import clients", u, "<p>Only an admin can import clients.</p>"), 403)
+                import csv as _csv, io as _io
+                added = skipped = 0
+                existing = {(r["name"].lower()) for r in con.execute("SELECT name FROM clients").fetchall()}
+                existing_gstin = {(r["gstin"]) for r in con.execute("SELECT gstin FROM clients WHERE gstin<>''").fetchall()}
+                for row in _csv.reader(_io.StringIO(f.get("csv_text", ""))):
+                    if not row or not row[0].strip():
+                        continue
+                    vals = [c.strip() for c in row] + [""] * 8
+                    name, gstin = vals[0], vals[1]
+                    if name.lower() in existing or (gstin and gstin in existing_gstin):
+                        skipped += 1; continue
+                    cycle = vals[6] if vals[6] in CYCLES else "Monthly"
+                    try: fee = float(vals[7]) if vals[7] else 0
+                    except ValueError: fee = 0
+                    con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by)
+                        VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (name, gstin, vals[2], vals[3], vals[4], vals[5], cycle, fee, u[0]))
+                    existing.add(name.lower())
+                    if gstin: existing_gstin.add(gstin)
+                    added += 1
+                log_action(con, u[0], "Imported clients", f"{added} added, {skipped} skipped (already present)")
+                con.commit(); con.close()
+                return self.send_html(page("Import clients", u, f"<p><b>{added} clients added, {skipped} skipped</b> (already present). Cycle and fee were left as given, or Monthly / 0 where blank — set them later on Clients &rarr; Edit, or via a first bill.</p><p><a href='/clients'>Back to Clients</a></p>"))
             if path == "/clients":
                 con.execute("""INSERT INTO clients (name, gstin, contact, phone, email, office, cycle, fee, created_by)
                     VALUES (?,?,?,?,?,?,?,?,?)""",
@@ -579,6 +648,8 @@ it on the Change password page straight away.</p>"""
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
                      f.get("status", "Draft"), f.get("notes", ""), u[0]))
+                if f.get("remember_fee"):
+                    con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
             elif path == "/bill-status":
                 con.execute("UPDATE bills SET status=? WHERE bill_no=?", (f["status"], f["bill_no"]))
