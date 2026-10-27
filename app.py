@@ -168,37 +168,37 @@ def page(title, user, body):
     if not user:
         return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)} - Bill Tracker</title><style>
+<title>{esc(title)} - Narayan Bijur Bill Tracker</title><style>
 body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f1f4f9;color:#1f2937;margin:0}}
 .wrap{{max-width:460px;margin:80px auto;padding:0 16px}}
 .card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:28px;box-shadow:0 4px 18px rgba(15,40,80,.08)}}
-h1{{color:#0f4c9c;font-size:26px;margin:0 0 4px}} h2{{font-size:18px;margin:0 0 16px;color:#334155}}
+h1{{background:linear-gradient(135deg,#1d4ed8,#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:26px;margin:0 0 4px}} h2{{font-size:18px;margin:0 0 16px;color:#334155}}
 input{{width:100%;padding:10px;margin:6px 0;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}}
 button{{background:#1a7ae6;color:#fff;border:0;padding:11px 18px;border-radius:8px;cursor:pointer;font-weight:600;width:100%}}
-button:hover{{background:#0f63c7}} .red{{color:#b00020}} .muted{{color:#64748b;font-size:14px}}
-</style></head><body><div class="wrap"><div class="card"><h1>Bill Tracker</h1>
+button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4)}} .red{{color:#b00020}} .muted{{color:#64748b;font-size:14px}}
+</style></head><body><div class="wrap"><div class="card"><h1>Narayan Bijur Bill Tracker</h1>
 <p class="muted">Bills, clients and outstanding amounts — in one place.</p><h2>{esc(title)}</h2>{body}</div></div></body></html>"""
     nav = f"""<aside>
-<div class="brand">Bill Tracker</div>
+<div class="brand">Narayan Bijur<br><span>Bill Tracker</span></div>
 <a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/bills">Bills</a>
 <a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a>
 <a href="/users">Users</a><a href="/activity">Activity — who did what</a><a href="/change-password">Change password</a>
 <a href="/logout">Logout ({esc(user[0])})</a></aside>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)} - Bill Tracker</title><style>
-*{{box-sizing:border-box}} body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f1f4f9;color:#1f2937;margin:0}}
-.layout{{display:flex;min-height:100vh}} aside{{width:210px;background:#0f2a4d;color:#fff;padding:20px 14px;flex-shrink:0}}
-.brand{{font-size:20px;font-weight:700;margin:0 0 22px 8px}} aside a{{display:block;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:8px;margin:2px 0}}
-aside a:hover{{background:#1e3f66;color:#fff}} main{{flex:1;padding:24px;max-width:1100px}}
+<title>{esc(title)} - Narayan Bijur Bill Tracker</title><style>
+*{{box-sizing:border-box}} body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:linear-gradient(180deg,#eef2ff 0%,#f8fafc 320px);color:#1f2937;margin:0}}
+.layout{{display:flex;min-height:100vh}} aside{{width:240px;background:linear-gradient(180deg,#0f2a4d,#1e3a8a 55%,#312e81);color:#fff;padding:22px 14px;flex-shrink:0;position:sticky;top:0;height:100vh}}
+.brand{{font-size:20px;font-weight:800;margin:0 0 26px 8px;line-height:1.2}} .brand span{{font-size:14px;font-weight:600;color:#93c5fd;letter-spacing:.4px;text-transform:uppercase}} aside a{{display:block;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:8px;margin:2px 0}}
+aside a:hover{{background:#1e3f66;color:#fff}} main{{flex:1;padding:28px 32px;max-width:1280px}}
 h1{{font-size:22px;margin:0 0 18px}} .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}}
-.kpi{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px}} .kpi b{{font-size:22px;display:block;margin-top:4px}}
-.kpi span{{color:#64748b;font-size:13px}} .card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:16px;box-shadow:0 1px 4px rgba(15,40,80,.05)}}
+.kpi{{background:#fff;border:1px solid #e2e8f0;border-left:4px solid #2563eb;border-radius:14px;padding:18px;box-shadow:0 2px 10px rgba(15,40,80,.06)}} .kpi:nth-child(2){{border-left-color:#059669}} .kpi:nth-child(3){{border-left-color:#7c3aed}} .kpi:nth-child(4){{border-left-color:#dc2626}} .kpi b{{font-size:22px;display:block;margin-top:4px}}
+.kpi span{{color:#64748b;font-size:13px}} .card{{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:16px;box-shadow:0 4px 16px rgba(15,40,80,.06)}}
 table{{border-collapse:collapse;width:100%;font-size:14px}} th{{text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;padding:10px 8px;border-bottom:1px solid #e2e8f0}}
 td{{padding:11px 8px;border-bottom:1px solid #f1f5f9}} tr:hover td{{background:#f8fafc}} .amt{{text-align:right;font-variant-numeric:tabular-nums}}
 input,select{{padding:9px 11px;margin:3px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px}}
-button,.btn{{background:#1a7ae6;color:#fff;border:0;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block}}
-button:hover{{background:#0f63c7}} .badge{{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}}
+button,.btn{{background:linear-gradient(135deg,#2563eb,#7c3aed);transition:transform .15s ease,box-shadow .15s ease;box-shadow:0 4px 14px rgba(37,99,235,.35);color:#fff;border:0;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block}}
+button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4)}} .badge{{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}}
 .b-draft{{background:#e2e8f0;color:#475569}} .b-sent{{background:#dbeafe;color:#1d4ed8}} .b-paid{{background:#dcfce7;color:#15803d}}
 .b-part{{background:#fef3c7;color:#b45309}} .b-over{{background:#fee2e2;color:#b91c1c}}
 .topbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}}
@@ -208,10 +208,10 @@ button:hover{{background:#0f63c7}} .badge{{padding:3px 10px;border-radius:999px;
 .invoice-head h2{{font-size:26px;margin:0}} .invoice-meta{{text-align:right;color:#64748b}}
 .totals{{width:320px;margin-left:auto}} .totals td{{border:0}}
 .chart{{display:flex;align-items:flex-end;gap:10px;height:120px;padding-top:10px}}
-.bar{{flex:1;background:#1a7ae6;border-radius:6px 6px 0 0;min-height:4px}}
+.bar{{flex:1;background:linear-gradient(180deg,#60a5fa,#2563eb);border-radius:6px 6px 0 0;min-height:4px}}
 .bar-wrap{{flex:1;text-align:center;font-size:11px;color:#64748b}}
 .warn{{background:#fffbeb;border:1px solid #fde68a;padding:12px;border-radius:10px}} .red{{color:#b91c1c}} .muted{{color:#64748b}}
-@media(max-width:760px){{.layout{{flex-direction:column}} aside{{width:100%}} .kpis{{grid-template-columns:1fr 1fr}}}}
+@media(max-width:1024px){{main{{padding:20px}} .kpis{{grid-template-columns:1fr 1fr}}}} @media(max-width:760px){{.layout{{flex-direction:column}} aside{{width:100%;height:auto;position:static}} .kpis{{grid-template-columns:1fr}}}}
 </style></head><body><div class="layout">{nav}<main><div class="topbar"><div><a class="btn" href="/clients">+ New client</a>
 <a class="btn" href="/bills">+ New bill</a></div>
 <form method="get" action="/bills"><input name="search" placeholder="Search bill or client…"></form></div>
