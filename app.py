@@ -20,6 +20,7 @@ import html
 import os
 import secrets
 import sqlite3
+import re
 import urllib.parse
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -123,6 +124,9 @@ def init_db():
         except Exception:
             if con.is_pg:
                 con.raw.rollback()
+    con.execute(f"""CREATE TABLE IF NOT EXISTS payments (
+        id {id_type}, bill_id INTEGER NOT NULL, pay_date TEXT, amount REAL NOT NULL,
+        mode TEXT, note TEXT, recorded_by TEXT, created_at TEXT, final_settlement INTEGER DEFAULT 0)""")
     con.execute(f"""CREATE TABLE IF NOT EXISTS audit_log (
         id {id_type}, at TEXT NOT NULL, username TEXT NOT NULL,
         action TEXT NOT NULL, detail TEXT)""")
@@ -161,12 +165,28 @@ def current_period(cycle, today=None):
     return ""
 
 
-def next_bill_no(con):
+def firm_code(issued_by):
+    if not issued_by:
+        return ""
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", issued_by) if w and w.lower() not in ("and", "the", "&")]
+    if not words:
+        return ""
+    if len(words) == 1:
+        return words[0][:4].upper()
+    return "".join(w[0] for w in words)[:4].upper()
+
+
+def next_bill_no(con, kind="Final", issued_by=""):
     year = date.today().year
-    row = con.execute("SELECT bill_no FROM bills WHERE bill_no LIKE ? ORDER BY id DESC LIMIT 1",
-                      (f"BILL-{year}-%",)).fetchone()
-    n = int(row["bill_no"].rsplit("-", 1)[1]) + 1 if row else 1
-    return f"BILL-{year}-{n:04d}"
+    prefix = "PF" if kind == "Pro forma" else "BILL"
+    code = firm_code(issued_by)
+    pat = f"{prefix}-{code}-{year}-%" if code else f"{prefix}-{year}-%"
+    row = con.execute("SELECT bill_no FROM bills WHERE bill_no LIKE ? ORDER BY id DESC LIMIT 1", (pat,)).fetchone()
+    try:
+        n = int(row["bill_no"].rsplit("-", 1)[1]) + 1 if row else 1
+    except Exception:
+        n = 1
+    return f"{prefix}-{code}-{year}-{n:04d}" if code else f"{prefix}-{year}-{n:04d}"
 
 
 def esc(x):
@@ -365,19 +385,21 @@ password your admin gave you, then set your own here.</p>"""))
         recent = con.execute("""SELECT b.*, c.name AS cname FROM bills b
             JOIN clients c ON c.id=b.client_id ORDER BY b.id DESC LIMIT 5""").fetchall()
         con.close()
-        billed = sum(b["total"] for b in bills)
-        paid = sum(b["amount_paid"] or 0 for b in bills)
-        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] in ("Settled", "Balance billed"))
+        _money = [b for b in bills if (b["bill_kind"] or "Final") != "Pro forma"]
+        billed = sum(b["total"] for b in _money)
+        paid = sum(b["amount_paid"] or 0 for b in _money)
+        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in _money if b["status"] in ("Settled", "Balance billed"))
+        proforma_total = sum(b["total"] for b in bills if (b["bill_kind"] or "Final") == "Pro forma")
         settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] in ("Settled", "Balance billed"))
         overdue = [b for b in bills if b["status"] == "Overdue"]
         from collections import defaultdict
         from datetime import date as _d
         by_period = defaultdict(float)
-        for b in bills:
+        for b in _money:
             by_period[b["period_label"]] += b["total"]
         con2 = db()
         top = con2.execute("""SELECT c.name AS n, SUM(b.total) AS t FROM bills b
-            JOIN clients c ON c.id=b.client_id GROUP BY c.name ORDER BY t DESC LIMIT 5""").fetchall()
+            JOIN clients c ON c.id=b.client_id WHERE b.bill_kind IS NULL OR b.bill_kind <> 'Pro forma' GROUP BY c.name ORDER BY t DESC LIMIT 5""").fetchall()
         con2.close()
         periods = sorted(by_period)[-6:]
         mx = max(by_period.values()) if by_period else 1
@@ -385,7 +407,7 @@ password your admin gave you, then set your own here.</p>"""))
         top_tr = "".join(f"<tr><td>{esc(r['n'])}</td><td class='amt'>&#8377;{r['t']:,.2f}</td></tr>" for r in top)
         today = _d.today().isoformat()
         aging = {"0-30 days": 0, "31-60 days": 0, "60+ days": 0}
-        for b in bills:
+        for b in _money:
             if b["status"] in ("Paid", "Settled", "Balance billed") or not b["due_date"] or b["due_date"] >= today:
                 continue
             days = (_d.fromisoformat(today) - _d.fromisoformat(b["due_date"])).days
@@ -413,6 +435,7 @@ password your admin gave you, then set your own here.</p>"""))
 <div class="kpi"><span>Total billed</span><b>&#8377;{billed:,.2f}</b></div>
 <div class="kpi"><span>Paid</span><b>&#8377;{paid:,.2f}</b></div>
 <div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid - settled_writeoff:,.2f}</b></div></div>
+<p class="muted">Pro forma bills (not counted above): &#8377;{proforma_total:,.2f} — pro forma totals are shown separately and never added to billed or outstanding.</p>
 <div class="card"><b>Overdue bills: <span class="red">{len(overdue)}</span></b> &nbsp;|&nbsp;
 Check <a href="/not-billed">Not billed yet</a> before month-end so no company is missed.</div>
 <div class="card"><b>Billed by period</b><div class="chart">{bars}</div></div>
@@ -421,7 +444,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <div class="card"><b>Overdue ageing (unpaid, past due date)</b>
 <table><tr><th>Age</th><th style="text-align:right">Outstanding</th></tr>{aging_tr}</table></div>
 <div class="card"><b>Billed by firm name</b>
-<table><tr><th>Firm</th><th style="text-align:right">Billed</th></tr>{"".join(f"<tr><td>{esc(k or '(not set)')}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in sorted(((lambda d: d)(__import__('collections').defaultdict(float, {kk: sum(b['total'] for b in bills if (b['issued_by'] or '') == kk) for kk in {bb['issued_by'] or '' for bb in bills}}))).items(), key=lambda x: -x[1]))}</table></div>
+<table><tr><th>Firm</th><th style="text-align:right">Billed</th></tr>{"".join(f"<tr><td>{esc(k or '(not set)')}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in sorted(((lambda d: d)(__import__('collections').defaultdict(float, {kk: sum(b['total'] for b in _money if (b['issued_by'] or '') == kk) for kk in {bb['issued_by'] or '' for bb in _money}}))).items(), key=lambda x: -x[1]))}</table></div>
 <div class="card"><b>Recent bills</b>
 <table><tr><th>Bill</th><th>Client</th><th>Period</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table></div>"""
         self.send_html(page("Dashboard", u, body))
@@ -477,7 +500,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
                      f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td>{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}<td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
-            rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
+            rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower() or search in (r["heading"] or "").lower()]
         filt = "".join(f"<option {'selected' if s == status else ''}>{s}</option>" for s in [""] + STATUSES)
         body = f"""<form method="post" action="/bills"><p>
 <select name="client_id" id="bill_client" required onchange="var o=this.options[this.selectedIndex];var a=document.getElementById('bill_amount');if(o&&o.dataset.fee&&parseFloat(o.dataset.fee)>0)a.value=o.dataset.fee">{opts}</select>
@@ -494,7 +517,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <datalist id="firms">{firm_opts}</datalist>
 <input name="notes" placeholder="Notes (service, etc.)">
 <button>Add bill</button></p></form>
-<form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
+<form method="get"><input name="search" placeholder="Search bill no., client or heading" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select>
 <select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select>
 <select name="kind" onchange="this.form.submit()"><option value="">All kinds</option><option {'selected' if qs.get("kind", [""])[0] == 'Final' else ''}>Final</option><option {'selected' if qs.get("kind", [""])[0] == 'Pro forma' else ''}>Pro forma</option></select> <button>Search</button></form>
@@ -533,6 +556,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         r = con.execute("""SELECT b.*, c.name AS cname, c.gstin AS cgstin, c.contact AS ccontact,
             c.email AS cemail, c.office AS coffice FROM bills b
             JOIN clients c ON c.id=b.client_id WHERE b.id=?""", (bill_id,)).fetchone()
+        _pays = con.execute("SELECT * FROM payments WHERE bill_id=? ORDER BY id", (bill_id,)).fetchall() if r else []
         con.close()
         if not r:
             return self.send_html(page("Bill not found", u, "<p>No such bill.</p>"), 404)
@@ -540,6 +564,16 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
             return self.send_html(page("Bill", u, "<p>You can only see bills you put in.</p>"), 403)
         paid = r["amount_paid"] or 0
         balance = r["total"] - paid
+        _pay_rows = "".join(f"<tr><td>{esc(py['pay_date']) or '-'}</td><td class='amt'>&#8377;{py['amount']:,.2f}</td>"
+            f"<td>{esc(py['mode']) or ''}</td><td>{esc(py['note']) or ''}</td><td>{esc(py['recorded_by']) or ''}</td>"
+            f"<td>{'Final settlement' if py['final_settlement'] else ''}</td></tr>" for py in _pays)
+        _pay_sum = sum(py["amount"] for py in _pays)
+        if paid > _pay_sum + 0.01:
+            _pay_rows += f"<tr><td>-</td><td class='amt'>&#8377;{paid - _pay_sum:,.2f}</td><td colspan='4' class='muted'>Earlier payments (before payment history tracking)</td></tr>"
+        _gst_rate = r["gst_percent"] or 0
+        _pay_table = f"""<div class="card"><b>Payment history</b>
+<table><tr><th>Date</th><th style="text-align:right">Amount</th><th>Mode</th><th>Note</th><th>Recorded by</th><th></th></tr>{_pay_rows if _pay_rows else '<tr><td colspan="6" class="muted">No payments recorded yet.</td></tr>'}</table>
+<p class="muted">GST portion of a payment (at { _gst_rate:.0f}%): amount x {_gst_rate:.0f} / (100 + {_gst_rate:.0f}). For a part payment, that is the part-bill GST for that payment.</p></div>"""
         if u[1] != "admin":
             self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
 <h2>Invoice {esc(r['bill_no'])}</h2><p><b>{esc(r['heading'] or '')}</b></p><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
@@ -557,7 +591,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance if r['status'] != 'Settled' else 0:,.2f}</b></td></tr>
 {'<tr><td>Settled / written off</td><td class="amt">&#8377;' + format(balance, ',.2f') + '</td></tr>' if r['status'] == 'Settled' else ''}</table>
+{_pay_table}
 <p><button onclick="window.print()">Print / Save as PDF</button></p>
+{'<form method="post" action="/delete-bill" onsubmit="return confirm(\'Delete this bill? Its payment history is also removed. This cannot be undone.\')"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Delete bill (admin only)</button></form>' if u[1] == 'admin' else ''}
 {'<form method="post" action="/convert-final"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Convert to final bill</button></form>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted">Balance billed separately as bill id ' + str(r['balance_bill_id']) + ' — this bill\'s remaining balance is tracked there, not here.</p>' if r['balance_bill_id'] else ''}
 {'<form method="post" action="/raise-balance-bill"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><p><input name="bill_date" type="date" value="' + now_ist().strftime("%Y-%m-%d") + '" required> <button>Raise separate bill for balance</button></p><p class="muted">Creates a new bill for this bill\'s remaining balance (same client, same GST %). This bill then becomes “Balance billed” so the balance is not counted twice. Use this only when the part payment is NOT a final settlement — if it is, tick final settlement on the payment instead.</p></form>' if r['status'] == 'Part-paid' else ''}
@@ -566,6 +602,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
 <input name="amount" type="number" step="0.01" placeholder="Amount received" required>
 <input name="pay_date" type="date">
+<select name="mode"><option>Bank transfer</option><option>Cash</option><option>Cheque</option><option>UPI</option><option>Other</option></select>
+<input name="note" placeholder="Note (e.g. cheque no., UTR)">
 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="final_settlement" value="1"> This payment is the final settlement — close this bill even if a balance remains</label>
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""))
@@ -586,7 +624,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance if r['status'] != 'Settled' else 0:,.2f}</b></td></tr>
 {'<tr><td>Settled / written off</td><td class="amt">&#8377;' + format(balance, ',.2f') + '</td></tr>' if r['status'] == 'Settled' else ''}</table>
+{_pay_table}
 <p><button onclick="window.print()">Print / Save as PDF</button></p>
+{'<form method="post" action="/delete-bill" onsubmit="return confirm(\'Delete this bill? Its payment history is also removed. This cannot be undone.\')"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Delete bill (admin only)</button></form>' if u[1] == 'admin' else ''}
 {'<form method="post" action="/convert-final"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Convert to final bill</button></form>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 {'<p class="muted">Balance billed separately as bill id ' + str(r['balance_bill_id']) + ' — this bill\'s remaining balance is tracked there, not here.</p>' if r['balance_bill_id'] else ''}
 {'<form method="post" action="/raise-balance-bill"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><p><input name="bill_date" type="date" value="' + now_ist().strftime("%Y-%m-%d") + '" required> <button>Raise separate bill for balance</button></p><p class="muted">Creates a new bill for this bill\'s remaining balance (same client, same GST %). This bill then becomes “Balance billed” so the balance is not counted twice. Use this only when the part payment is NOT a final settlement — if it is, tick final settlement on the payment instead.</p></form>' if r['status'] == 'Part-paid' else ''}</div>
@@ -594,6 +634,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
 <input name="amount" type="number" step="0.01" placeholder="Amount received" required>
 <input name="pay_date" type="date">
+<select name="mode"><option>Bank transfer</option><option>Cash</option><option>Cheque</option><option>UPI</option><option>Other</option></select>
+<input name="note" placeholder="Note (e.g. cheque no., UTR)">
 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="final_settlement" value="1"> This payment is the final settlement — close this bill even if a balance remains</label>
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""
@@ -610,9 +652,11 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         else:
             bills = con.execute("""SELECT * FROM bills WHERE client_id=? ORDER BY id DESC""", (cid,)).fetchall()
         con.close()
-        billed = sum(b["total"] for b in bills)
-        paid = sum(b["amount_paid"] or 0 for b in bills)
-        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] in ("Settled", "Balance billed"))
+        _money = [b for b in bills if (b["bill_kind"] or "Final") != "Pro forma"]
+        billed = sum(b["total"] for b in _money)
+        paid = sum(b["amount_paid"] or 0 for b in _money)
+        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in _money if b["status"] in ("Settled", "Balance billed"))
+        proforma_total = sum(b["total"] for b in bills if (b["bill_kind"] or "Final") == "Pro forma")
         tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['heading'] or '')}</td><td>{esc(b['period_label'])}</td>"
                      f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
                      f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
@@ -627,7 +671,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
 <tr><td>Settled / written off for this client</td><td class="amt">&#8377;{settled_writeoff:,.2f}</td></tr>
-<tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid - settled_writeoff:,.2f}</b></td></tr></table>
+<tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid - settled_writeoff:,.2f}</b></td></tr>
+<tr><td>Pro forma for this client (not in totals above)</td><td class="amt">&#8377;{proforma_total:,.2f}</td></tr></table>
 <p class="muted">This is money for this one client only — the Dashboard never totals across all clients for staff.</p></div>"""
         self.send_html(page(c["name"], u, body))
 
@@ -672,6 +717,7 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <input name="gst_percent" type="number" step="0.01" value="{r['gst_percent']}">
 <select name="status">{opts}</select>
 <select name="bill_kind"><option {'selected' if (r['bill_kind'] or 'Final') == 'Final' else ''}>Final</option><option {'selected' if r['bill_kind'] == 'Pro forma' else ''}>Pro forma</option></select>
+{f'<input name="created_by" value="{esc(r["created_by"] or "")}" placeholder="Created by (admin: reassign to another username)">' if u[1] == 'admin' else ''}
 <input name="issued_by" value="{esc(r['issued_by'] or '')}" placeholder="Issued by (firm name)">
 <input name="notes" value="{esc(r['notes'])}" placeholder="Notes">
 <button>Save bill</button></p></form>
@@ -708,6 +754,10 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <select name="role"><option>staff</option><option>admin</option></select>
 <button>Add user</button></p></form>
 <table><tr><th>Username</th><th>Role</th><th>Actions</th></tr>{tr}</table>
+<form method="post" action="/reassign"><p><b>Reassign entries (e.g. when staff leaves):</b><br>
+<input name="from_user" placeholder="From username" required>
+<input name="to_user" placeholder="To username" required>
+<button>Reassign all bills and clients</button></p></form>
 <p><b>Removing a staff member only stops their login.</b> Their bills, clients and activity stay in the tracker under their name, so nothing they put in is lost when they leave.</p>
 <p>Give each staff member their own username with a password you set here.
 Staff cannot change their own password — only an admin can, from this page.
@@ -761,6 +811,10 @@ it on the Change password page straight away.</p>"""
         con.close()
         sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by", "Heading"],
               bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by", "heading"])
+        pays = con.execute("""SELECT b.bill_no, c.name, p.pay_date, p.amount, p.mode, p.note, p.recorded_by, p.final_settlement
+            FROM payments p JOIN bills b ON b.id=p.bill_id JOIN clients c ON c.id=b.client_id ORDER BY p.id""").fetchall()
+        sheet("Payments", ["Bill no", "Client", "Date", "Amount", "Mode", "Note", "Recorded by", "Final settlement"],
+              pays, ["bill_no", "name", "pay_date", "amount", "mode", "note", "recorded_by", "final_settlement"])
         sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
               clients, ["name", "gstin", "contact", "phone", "email", "office", "cycle", "fee", "active", "created_by"])
         sheet("Activity", ["When", "Staff", "Action", "Detail"],
@@ -834,6 +888,11 @@ it on the Change password page straight away.</p>"""
                 else:
                     status = "Paid" if new_paid >= r["total"] - 0.01 else "Part-paid"
                 con.execute("UPDATE bills SET amount_paid=?, status=? WHERE id=?", (new_paid, status, int(f["bill_id"])))
+                con.execute("""INSERT INTO payments (bill_id, pay_date, amount, mode, note, recorded_by, created_at, final_settlement)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    (int(f["bill_id"]), f.get("pay_date") or now_ist().strftime("%Y-%m-%d"), float(f["amount"]),
+                     f.get("mode", ""), f.get("note", ""), u[0], now_ist().strftime("%Y-%m-%d %H:%M"),
+                     1 if f.get("final_settlement") else 0))
                 log_action(con, u[0], "Recorded payment", f"Bill id {f['bill_id']}: Rs {f['amount']} -> {status}" + (" (final settlement, balance Rs " + format(r["total"] - new_paid, ",.2f") + " accepted)" if status == "Settled" else ""))
                 con.commit()
             con.close()
@@ -888,7 +947,7 @@ it on the Change password page straight away.</p>"""
                 gst = bill["gst_percent"] or 0
                 gst_amt = round(balance * gst / (100 + gst), 2) if gst else 0
                 amt = round(balance - gst_amt, 2)
-                new_no = next_bill_no(con)
+                new_no = next_bill_no(con, bill["bill_kind"] or "Final", bill["issued_by"] or "")
                 cur = con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
                     amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind, heading)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -902,6 +961,26 @@ it on the Change password page straight away.</p>"""
                 log_action(con, u[0], "Raised balance bill", f"{bill['bill_no']} -> {new_no} for balance Rs {balance:,.2f}")
                 con.commit(); con.close()
                 return self.redirect(f"/bills/{new_id}")
+            if path == "/delete-bill" and u[1] == "admin":
+                con.execute("DELETE FROM payments WHERE bill_id=?", (int(f["bill_id"]),))
+                _bn = con.execute("SELECT bill_no FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
+                con.execute("DELETE FROM bills WHERE id=?", (int(f["bill_id"]),))
+                log_action(con, u[0], "Deleted bill", _bn["bill_no"] if _bn else str(f["bill_id"]))
+                con.commit(); con.close()
+                return self.redirect("/bills")
+            if path == "/reassign" and u[1] == "admin":
+                _from, _to = f["from_user"], f["to_user"]
+                if _from == _to:
+                    con.close()
+                    return self.send_html(page("Reassign", u, "<p>From and To are the same user.</p>"), 400)
+                if not con.execute("SELECT 1 FROM users WHERE username=?", (_to,)).fetchone():
+                    con.close()
+                    return self.send_html(page("Reassign", u, "<p>To user does not exist.</p>"), 400)
+                _nb = con.execute("UPDATE bills SET created_by=? WHERE created_by=?", (_to, _from)).rowcount
+                _nc = con.execute("UPDATE clients SET created_by=? WHERE created_by=?", (_to, _from)).rowcount
+                log_action(con, u[0], "Reassigned entries", f"{_from} -> {_to}: {_nb} bills, {_nc} clients")
+                con.commit(); con.close()
+                return self.send_html(page("Reassigned", u, f"<p><b>{_nb} bills and {_nc} clients</b> moved from {_from} to {_to}. The moved entries now belong to {_to} for staff-scope purposes; their history and amounts are unchanged.</p><p><a href='/users'>Back to Users</a></p>"))
             if path == "/convert-final":
                 if u[1] != "admin":
                     _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
@@ -924,6 +1003,8 @@ it on the Change password page straight away.</p>"""
                     (f["period_label"], f["bill_date"], f.get("due_date") or None, amt, gst,
                      round(amt * (1 + gst / 100), 2), f.get("status", "Draft"), f.get("notes", ""),
                      f.get("issued_by", ""), f.get("bill_kind", "Final"), f.get("heading", ""), int(f["id"])))
+                if u[1] == "admin" and f.get("created_by"):
+                    con.execute("UPDATE bills SET created_by=? WHERE id=?", (f["created_by"], int(f["id"])))
                 log_action(con, u[0], "Edited bill", f"Bill id {f['id']}")
                 con.commit(); con.close()
                 return self.redirect("/bills")
@@ -976,11 +1057,16 @@ it on the Change password page straight away.</p>"""
                      float(f.get("fee") or 0), u[0], now_ist().strftime("%Y-%m-%d %H:%M")))
                 log_action(con, u[0], "Added client", f["name"])
             elif path == "/bills":
+                _dup = con.execute("""SELECT bill_no FROM bills WHERE client_id=? AND period_label=? AND bill_kind=? AND COALESCE(heading,'')=?
+                    """, (int(f["client_id"]), f["period_label"], f.get("bill_kind", "Final"), f.get("heading", ""))).fetchone()
+                if _dup:
+                    con.close()
+                    return self.send_html(page("Duplicate bill", u, f"<p>A bill already exists for this client, period, kind and heading: <b>{esc(_dup['bill_no'])}</b>. Change the heading or period, or edit that bill instead.</p><p><a href='/bills'>Back to Bills</a></p>"), 400)
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
                     amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind, heading)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
+                    (next_bill_no(con, f.get("bill_kind", "Final"), f.get("issued_by", "")), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
                      f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", ""),
                      now_ist().strftime("%Y-%m-%d %H:%M"), f.get("bill_kind", "Final"), f.get("heading", "")))
