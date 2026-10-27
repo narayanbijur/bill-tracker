@@ -214,7 +214,7 @@ button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4
 <div class="brand">Narayan Bijur<br><span>Bill Tracker</span></div>
 <a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/import-clients">Import clients</a><a href="/bills">Bills</a>
 <a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a><a href="/export.xlsx">Export Excel</a>
-<a href="/users">Users</a><a href="/activity">Activity — who did what</a><a href="/change-password">Change password</a>
+<a href="/users">Users</a><a href="/activity">Activity — who did what</a>{'<a href="/change-password">Change password</a>' if user[1] == 'admin' else ''}
 <a href="/logout">Logout ({esc(user[0])})</a></aside>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -328,6 +328,8 @@ Password <input type="password" name="password" required></p>
         if path.startswith("/edit-bill/") and path.rsplit("/", 1)[-1].isdigit():
             return self.edit_bill_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/change-password":
+            if u[1] != "admin":
+                return self.send_html(page("Change password", u, "<p>Only an admin can change passwords. Ask your admin to set a new password for you on the Users page.</p>"), 403)
             return self.send_html(page("Change password", u, """
 <form method="post" action="/change-password">
 <p>Current password <input type="password" name="current" required></p>
@@ -678,9 +680,9 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <button>Add user</button></p></form>
 <table><tr><th>Username</th><th>Role</th><th>Actions</th></tr>{tr}</table>
 <p><b>Removing a staff member only stops their login.</b> Their bills, clients and activity stay in the tracker under their name, so nothing they put in is lost when they leave.</p>
-<p>Give each staff member their own username with a temporary password.
-On first login they open <b>Change password</b> (left menu) and set their
-own password. The first admin login is <b>admin / admin123</b> — change
+<p>Give each staff member their own username with a password you set here.
+Staff cannot change their own password — only an admin can, from this page.
+The first admin login is <b>admin / admin123</b> — change
 it on the Change password page straight away.</p>"""
         self.send_html(page("Users", u, body))
 
@@ -775,6 +777,8 @@ it on the Change password page straight away.</p>"""
         if path.startswith("/edit-client/") and path.rsplit("/", 1)[-1].isdigit():
             return self.edit_client_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/change-password":
+            if u[1] != "admin":
+                return self.send_html(page("Change password", u, "<p>Only an admin can change passwords.</p>"), 403)
             if check_pw(u[0], f.get("current", "")) is None:
                 return self.send_html(page("Change password", u, "<p class='red'>Current password is wrong.</p>"), 401)
             if f.get("new", "") != f.get("confirm", "") or len(f.get("new", "")) < 8:
