@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Simple bill tracker for a CA firm with two offices.
 
-Runs on the firm's own server computer with Python 3 only (no extra
-packages, no internet needed at run time). Data lives in a local
-SQLite file (bill_tracker.db) next to this file, so backing up is
-just copying that one file.
+Data backend: if the DATABASE_URL environment variable is set, data
+lives in that PostgreSQL database (used on Render, so data survives
+restarts and redeploys). Otherwise data lives in a local SQLite file
+(bill_tracker.db) next to this file, so backing up is just copying
+that one file. PostgreSQL needs psycopg2-binary (see requirements.txt).
 
 Start:  python3 app.py
 Then open in a browser:  http://<server-computer-IP>:8000
@@ -31,32 +32,73 @@ STATUSES = ["Draft", "Sent", "Paid", "Part-paid", "Overdue"]
 CYCLES = ["Monthly", "Quarterly", "Yearly", "One-time"]
 
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    _PG_ERROR = (psycopg2.IntegrityError,)
+except Exception:
+    psycopg2 = None
+    _PG_ERROR = ()
+INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + _PG_ERROR
+
+
+class Con:
+    """Thin wrapper so the same code works on SQLite and PostgreSQL."""
+    def __init__(self, raw, is_pg):
+        self.raw = raw
+        self.is_pg = is_pg
+
+    def execute(self, sql, params=()):
+        if self.is_pg:
+            sql = sql.replace("?", "%s")
+            cur = self.raw.cursor(cursor_factory=RealDictCursor)
+        else:
+            cur = self.raw.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self.raw.commit()
+
+    def close(self):
+        self.raw.close()
+
+
 def db():
+    if DATABASE_URL and psycopg2:
+        url = DATABASE_URL
+        if "sslmode=" not in url:
+            url += ("&" if "?" in url else "?") + "sslmode=require"
+        return Con(psycopg2.connect(url), True)
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
-    return con
+    return Con(con, False)
 
 
 def init_db():
     con = db()
-    con.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
-            pass_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY, name TEXT NOT NULL, gstin TEXT,
+    id_type = "SERIAL PRIMARY KEY" if con.is_pg else "INTEGER PRIMARY KEY"
+    for stmt in [
+        f"""CREATE TABLE IF NOT EXISTS users (
+            id {id_type}, username TEXT UNIQUE NOT NULL,
+            pass_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS clients (
+            id {id_type}, name TEXT NOT NULL, gstin TEXT,
             contact TEXT, phone TEXT, email TEXT, office TEXT,
             cycle TEXT NOT NULL DEFAULT 'Monthly', fee REAL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS bills (
-            id INTEGER PRIMARY KEY, bill_no TEXT UNIQUE NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1)""",
+        f"""CREATE TABLE IF NOT EXISTS bills (
+            id {id_type}, bill_no TEXT UNIQUE NOT NULL,
             client_id INTEGER NOT NULL REFERENCES clients(id),
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT);
-    """)
+            notes TEXT, created_by TEXT)""",
+    ]:
+        con.execute(stmt)
     if not con.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():
         salt = secrets.token_hex(16)
         h = hashlib.pbkdf2_hmac("sha256", b"admin123", salt.encode(), 100000).hex()
@@ -99,22 +141,52 @@ def esc(x):
     return html.escape("" if x is None else str(x))
 
 
+def badge(status):
+    cls = {"Draft": "b-draft", "Sent": "b-sent", "Paid": "b-paid",
+           "Part-paid": "b-part", "Overdue": "b-over"}.get(status, "b-draft")
+    return f'<span class="badge {cls}">{esc(status)}</span>'
+
+
 def page(title, user, body):
-    nav = ""
-    if user:
-        nav = (f'<nav><a href="/dashboard">Dashboard</a> <a href="/clients">Clients</a> '
-               f'<a href="/bills">Bills</a> <a href="/not-billed">Not billed yet</a> '
-               f'<a href="/export.csv">Export CSV</a> '
-               f'<a href="/users">Users</a> <a href="/logout">Logout ({esc(user[0])})</a></nav>')
+    if not user:
+        return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)} - Bill Tracker</title><style>
+body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f1f4f9;color:#1f2937;margin:0}}
+.wrap{{max-width:460px;margin:80px auto;padding:0 16px}}
+.card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:28px;box-shadow:0 4px 18px rgba(15,40,80,.08)}}
+h1{{color:#0f4c9c;font-size:26px;margin:0 0 4px}} h2{{font-size:18px;margin:0 0 16px;color:#334155}}
+input{{width:100%;padding:10px;margin:6px 0;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}}
+button{{background:#1a7ae6;color:#fff;border:0;padding:11px 18px;border-radius:8px;cursor:pointer;font-weight:600;width:100%}}
+button:hover{{background:#0f63c7}} .red{{color:#b00020}} .muted{{color:#64748b;font-size:14px}}
+</style></head><body><div class="wrap"><div class="card"><h1>Bill Tracker</h1>
+<p class="muted">Bills, clients and outstanding amounts — in one place.</p><h2>{esc(title)}</h2>{body}</div></div></body></html>"""
+    nav = f"""<aside>
+<div class="brand">Bill Tracker</div>
+<a href="/dashboard">Dashboard</a><a href="/clients">Clients</a><a href="/bills">Bills</a>
+<a href="/not-billed">Not billed yet</a><a href="/export.csv">Export CSV</a>
+<a href="/users">Users</a><a href="/change-password">Change password</a>
+<a href="/logout">Logout ({esc(user[0])})</a></aside>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)}</title><style>
-body{{font-family:system-ui,Arial,sans-serif;max-width:980px;margin:20px auto;padding:0 16px;color:#222}}
-nav a{{margin-right:14px}} table{{border-collapse:collapse;width:100%}} td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left}}
-th{{background:#eef2f7}} .card{{border:1px solid #ccc;border-radius:8px;padding:12px;margin:10px 0}}
-.warn{{background:#fff3cd;padding:10px;border-radius:6px}} input,select{{padding:6px;margin:2px}}
-button{{padding:7px 14px;cursor:pointer}} .red{{color:#b00020;font-weight:bold}}
-</style></head><body><h1>Bill Tracker</h1>{nav}<h2>{esc(title)}</h2>{body}</body></html>"""
+<title>{esc(title)} - Bill Tracker</title><style>
+*{{box-sizing:border-box}} body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f1f4f9;color:#1f2937;margin:0}}
+.layout{{display:flex;min-height:100vh}} aside{{width:210px;background:#0f2a4d;color:#fff;padding:20px 14px;flex-shrink:0}}
+.brand{{font-size:20px;font-weight:700;margin:0 0 22px 8px}} aside a{{display:block;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:8px;margin:2px 0}}
+aside a:hover{{background:#1e3f66;color:#fff}} main{{flex:1;padding:24px;max-width:1100px}}
+h1{{font-size:22px;margin:0 0 18px}} .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}}
+.kpi{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px}} .kpi b{{font-size:22px;display:block;margin-top:4px}}
+.kpi span{{color:#64748b;font-size:13px}} .card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:16px;box-shadow:0 1px 4px rgba(15,40,80,.05)}}
+table{{border-collapse:collapse;width:100%;font-size:14px}} th{{text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;padding:10px 8px;border-bottom:1px solid #e2e8f0}}
+td{{padding:11px 8px;border-bottom:1px solid #f1f5f9}} tr:hover td{{background:#f8fafc}} .amt{{text-align:right;font-variant-numeric:tabular-nums}}
+input,select{{padding:9px 11px;margin:3px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px}}
+button,.btn{{background:#1a7ae6;color:#fff;border:0;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block}}
+button:hover{{background:#0f63c7}} .badge{{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}}
+.b-draft{{background:#e2e8f0;color:#475569}} .b-sent{{background:#dbeafe;color:#1d4ed8}} .b-paid{{background:#dcfce7;color:#15803d}}
+.b-part{{background:#fef3c7;color:#b45309}} .b-over{{background:#fee2e2;color:#b91c1c}}
+.warn{{background:#fffbeb;border:1px solid #fde68a;padding:12px;border-radius:10px}} .red{{color:#b91c1c}} .muted{{color:#64748b}}
+@media(max-width:760px){{.layout{{flex-direction:column}} aside{{width:100%}} .kpis{{grid-template-columns:1fr 1fr}}}}
+</style></head><body><div class="layout">{nav}<main><h1>{esc(title)}</h1>{body}</main></div></body></html>"""
 
 
 class H(BaseHTTPRequestHandler):
@@ -153,8 +225,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/login":
             return self.send_html(page("Login", None, """
 <form method="post" action="/login"><p>Username <input name="username" required>
-Password <input type="password" name="password" required>
-<button>Login</button></p></form>
+Password <input type="password" name="password" required></p>
+<button>Login</button></form>
 <p>First login: <b>admin / admin123</b> — change it on the Users page.</p>"""))
         if not u:
             return self.redirect("/login")
@@ -168,6 +240,15 @@ Password <input type="password" name="password" required>
             return self.not_billed_page(u)
         if path == "/users":
             return self.users_page(u)
+        if path == "/change-password":
+            return self.send_html(page("Change password", u, """
+<form method="post" action="/change-password">
+<p>Current password <input type="password" name="current" required></p>
+<p>New password <input type="password" name="new" required></p>
+<p>Confirm new password <input type="password" name="confirm" required></p>
+<button>Change password</button></form>
+<p class="muted">Use this on your first login too: log in with the temporary
+password your admin gave you, then set your own here.</p>"""))
         if path == "/logout":
             SESSIONS.pop(self.headers.get("Cookie", "").split("session=")[-1].split(";")[0], None)
             return self.redirect("/login")
@@ -179,18 +260,24 @@ Password <input type="password" name="password" required>
         con = db()
         bills = con.execute("SELECT * FROM bills").fetchall()
         clients = con.execute("SELECT COUNT(*) c FROM clients WHERE active=1").fetchone()["c"]
+        recent = con.execute("""SELECT b.*, c.name AS cname FROM bills b
+            JOIN clients c ON c.id=b.client_id ORDER BY b.id DESC LIMIT 5""").fetchall()
         con.close()
         billed = sum(b["total"] for b in bills)
         paid = sum(b["total"] for b in bills if b["status"] == "Paid")
         overdue = [b for b in bills if b["status"] == "Overdue"]
-        body = f"""<div class="card">Active clients: <b>{clients}</b> &nbsp;|&nbsp;
-Total billed: <b>&#8377;{billed:,.2f}</b> &nbsp;|&nbsp; Paid: <b>&#8377;{paid:,.2f}</b>
-&nbsp;|&nbsp; Outstanding: <b>&#8377;{billed - paid:,.2f}</b> &nbsp;|&nbsp;
-Overdue bills: <b class="red">{len(overdue)}</b></div>
-<div class="card"><b>Start here:</b> add clients on the Clients page, then add a bill
-for each client. The <a href="/not-billed">Not billed yet</a> page lists every active
-client who has no bill for the current period — check it before month-end so no
-company is missed.</div>"""
+        tr = "".join(f"<tr><td>{esc(r['bill_no'])}</td><td>{esc(r['cname'])}</td>"
+                     f"<td>{esc(r['period_label'])}</td><td class='amt'>&#8377;{r['total']:,.2f}</td>"
+                     f"<td>{badge(r['status'])}</td></tr>" for r in recent)
+        body = f"""<div class="kpis">
+<div class="kpi"><span>Active clients</span><b>{clients}</b></div>
+<div class="kpi"><span>Total billed</span><b>&#8377;{billed:,.2f}</b></div>
+<div class="kpi"><span>Paid</span><b>&#8377;{paid:,.2f}</b></div>
+<div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid:,.2f}</b></div></div>
+<div class="card"><b>Overdue bills: <span class="red">{len(overdue)}</span></b> &nbsp;|&nbsp;
+Check <a href="/not-billed">Not billed yet</a> before month-end so no company is missed.</div>
+<div class="card"><b>Recent bills</b>
+<table><tr><th>Bill</th><th>Client</th><th>Period</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table></div>"""
         self.send_html(page("Dashboard", u, body))
 
     def clients_page(self, u):
@@ -227,7 +314,10 @@ company is missed.</div>"""
         opts = "".join(f"<option value='{r['id']}'>{esc(r['name'])}</option>" for r in clients)
         tr = "".join(f"<tr><td>{esc(r['bill_no'])}</td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
-                     f"<td>&#8377;{r['total']:,.2f}</td><td>{esc(r['status'])}</td></tr>" for r in rows)
+                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td></tr>" for r in rows)
+        search = qs.get("search", [""])[0].lower()
+        if search:
+            rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
         filt = "".join(f"<option {'selected' if s == status else ''}>{s}</option>" for s in [""] + STATUSES)
         body = f"""<form method="post" action="/bills"><p>
 <select name="client_id" required>{opts}</select>
@@ -239,8 +329,9 @@ company is missed.</div>"""
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
 <input name="notes" placeholder="Notes (service, etc.)">
 <button>Add bill</button></p></form>
-<form method="get"><select name="status" onchange="this.form.submit()">{filt}</select></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th>Total</th><th>Status</th></tr>{tr}</table>
+<form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
+<select name="status" onchange="this.form.submit()">{filt}</select> <button>Search</button></form>
+<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -283,8 +374,10 @@ company is missed.</div>"""
 <select name="role"><option>staff</option><option>admin</option></select>
 <button>Add user</button></p></form>
 <table><tr><th>Username</th><th>Role</th></tr>{tr}</table>
-<p>Give each staff member their own username. The first admin login is
-<b>admin / admin123</b> — add a new admin, then delete or change the default if you can.</p>"""
+<p>Give each staff member their own username with a temporary password.
+On first login they open <b>Change password</b> (left menu) and set their
+own password. The first admin login is <b>admin / admin123</b> — change
+it on the Change password page straight away.</p>"""
         self.send_html(page("Users", u, body))
 
     def export_csv(self):
@@ -297,7 +390,9 @@ company is missed.</div>"""
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes"])
-        w.writerows([tuple(r) for r in rows])
+        cols = ["bill_no", "name", "period_label", "bill_date", "due_date",
+                "amount", "gst_percent", "total", "status", "notes"]
+        w.writerows([[r[c] for c in cols] for r in rows])
         data = buf.getvalue().encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/csv")
@@ -323,6 +418,17 @@ company is missed.</div>"""
             return
         if not u:
             return self.redirect("/login")
+        if path == "/change-password":
+            if check_pw(u[0], f.get("current", "")) is None:
+                return self.send_html(page("Change password", u, "<p class='red'>Current password is wrong.</p>"), 401)
+            if f.get("new", "") != f.get("confirm", "") or len(f.get("new", "")) < 8:
+                return self.send_html(page("Change password", u, "<p class='red'>New passwords do not match, or are shorter than 8 characters.</p>"), 400)
+            con = db()
+            salt = secrets.token_hex(16)
+            h = hashlib.pbkdf2_hmac("sha256", f["new"].encode(), salt.encode(), 100000).hex()
+            con.execute("UPDATE users SET pass_hash=?, salt=? WHERE username=?", (h, salt, u[0]))
+            con.commit(); con.close()
+            return self.send_html(page("Password changed", u, "<p><b>Password changed.</b> Use your new password next time you log in. <a href='/dashboard'>Back to Dashboard</a></p>"))
         con = db()
         try:
             if path == "/clients":
@@ -347,7 +453,7 @@ company is missed.</div>"""
                 con.execute("INSERT INTO users (username, pass_hash, salt, role) VALUES (?,?,?,?)",
                             (f["username"], h, salt, f.get("role", "staff")))
             con.commit()
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             con.close()
             return self.send_html(page("Error", u, "<p>That username or bill already exists. Go back and try again.</p>"), 400)
         con.close()
