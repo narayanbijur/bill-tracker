@@ -274,6 +274,8 @@ Password <input type="password" name="password" required></p>
             return self.dashboard(u)
         if path == "/clients":
             return self.clients_page(u)
+        if path.startswith("/clients/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.client_detail_page(u, int(path.rsplit("/", 1)[-1]))
         if path == "/bills":
             return self.bills_page(u, qs)
         if path == "/not-billed":
@@ -286,14 +288,8 @@ Password <input type="password" name="password" required></p>
             con.close()
             if u[1] != "admin":
                 rows = [r for r in rows if r["username"] == u[0]]
-            import re as _re
-            def _detail(r):
-                d = r['detail']
-                if u[1] != "admin" and r['action'] == "Recorded payment":
-                    d = _re.sub(r"Rs [^ ]+ ", "", d)
-                return d
             tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
-                         f"<td>{esc(r['action'])}</td><td>{esc(_detail(r))}</td></tr>" for r in rows)
+                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
@@ -368,7 +364,7 @@ password your admin gave you, then set your own here.</p>"""))
             k = "0-30 days" if days <= 30 else "31-60 days" if days <= 60 else "60+ days"
             aging[k] += (b["total"] - (b["amount_paid"] or 0))
         aging_tr = "".join(f"<tr><td>{k}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in aging.items())
-        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
+        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
                      f"<td>{esc(r['period_label'])}</td><td class='amt'>&#8377;{r['total']:,.2f}</td>"
                      f"<td>{badge(r['status'])}</td></tr>" for r in recent)
         if u[1] != "admin":
@@ -444,7 +440,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         firm_filter = qs.get("firm", [""])[0]
         if firm_filter:
             rows = [r for r in rows if (r["issued_by"] or "") == firm_filter]
-        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
+        tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
                      f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td><td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
@@ -515,7 +511,22 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
 <div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
 <p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
-<p class="muted">Staff view: status only. Amounts are shown to admin only.</p></div>"""))
+<table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
+<tr><td>Professional services — {esc(r['period_label'])}<br><span class="muted">{esc(r['notes'])}</span></td>
+<td class="amt">&#8377;{r['amount']:,.2f}</td></tr></table>
+<table class="totals"><tr><td>Subtotal</td><td class="amt">&#8377;{r['amount']:,.2f}</td></tr>
+<tr><td>GST ({r['gst_percent']:.0f}%)</td><td class="amt">&#8377;{r['total'] - r['amount']:,.2f}</td></tr>
+<tr><td><b>Total</b></td><td class="amt"><b>&#8377;{r['total']:,.2f}</b></td></tr>
+<tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
+<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance:,.2f}</b></td></tr></table>
+<p><button onclick="window.print()">Print / Save as PDF</button></p>
+<p class="muted">This bill only — no totals across clients are shown on the Dashboard.</p></div>
+<div class="card"><b>Record payment</b>
+<form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
+<input name="amount" type="number" step="0.01" placeholder="Amount received" required>
+<input name="pay_date" type="date">
+<button>Record payment</button></form>
+<p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""))
             return
         body = f"""<div class="card"><div class="invoice-head"><div>
 <h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
@@ -538,6 +549,36 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""
         self.send_html(page(f"Invoice {r['bill_no']}", u, body))
+
+    def client_detail_page(self, u, cid):
+        con = db()
+        c = con.execute("SELECT * FROM clients WHERE id=?", (cid,)).fetchone()
+        if not c:
+            con.close()
+            return self.send_html(page("Client not found", u, "<p>No such client.</p>"), 404)
+        if u[1] != "admin":
+            bills = con.execute("""SELECT * FROM bills WHERE client_id=? AND created_by=? ORDER BY id DESC""", (cid, u[0])).fetchall()
+        else:
+            bills = con.execute("""SELECT * FROM bills WHERE client_id=? ORDER BY id DESC""", (cid,)).fetchall()
+        con.close()
+        billed = sum(b["total"] for b in bills)
+        paid = sum(b["amount_paid"] or 0 for b in bills)
+        tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['period_label'])}</td>"
+                     f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
+                     f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
+                     f"<td>{esc(b['issued_by'] or '')}</td></tr>" for b in bills)
+        scope = "Your bills for this client only." if u[1] != "admin" else "All bills for this client."
+        edit = f"<a href='/edit-client/{cid}'>Edit client</a>" if u[1] == "admin" or c["created_by"] == u[0] else ""
+        body = f"""<div class="card"><h2>{esc(c['name'])}</h2>
+<p>{esc(c['gstin'])}<br>{esc(c['contact'])} {esc(c['phone'])} {esc(c['email'])}<br>Office: {esc(c['office'])} | Cycle: {esc(c['cycle'])} | Usual fee: &#8377;{c['fee']:,.2f}</p>
+<p>{edit}</p></div>
+<div class="card"><b>Bills for this client</b> <span class="muted">{scope}</span>
+<table><tr><th>Bill</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th></tr>{tr}</table>
+<table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
+<tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
+<tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid:,.2f}</b></td></tr></table>
+<p class="muted">This is money for this one client only — the Dashboard never totals across all clients for staff.</p></div>"""
+        self.send_html(page(c["name"], u, body))
 
     def edit_client_page(self, u, cid):
         con = db()
@@ -689,14 +730,8 @@ it on the Change password page straight away.</p>"""
             con.close()
             if u[1] != "admin":
                 rows = [r for r in rows if r["username"] == u[0]]
-            import re as _re
-            def _detail(r):
-                d = r['detail']
-                if u[1] != "admin" and r['action'] == "Recorded payment":
-                    d = _re.sub(r"Rs [^ ]+ ", "", d)
-                return d
             tr = "".join(f"<tr><td>{esc(r['at'])}</td><td><b>{esc(r['username'])}</b></td>"
-                         f"<td>{esc(r['action'])}</td><td>{esc(_detail(r))}</td></tr>" for r in rows)
+                         f"<td>{esc(r['action'])}</td><td>{esc(r['detail'])}</td></tr>" for r in rows)
             return self.send_html(page("Activity — who did what", u, f"""<div class="card">
 <p class="muted">Every entry, payment, status change and password change is recorded here with the staff member who did it and the time.</p>
 <table><tr><th>When</th><th>Staff</th><th>Action</th><th>Detail</th></tr>{tr}</table></div>"""))
@@ -715,9 +750,12 @@ it on the Change password page straight away.</p>"""
             con.commit(); con.close()
             return self.send_html(page("Password changed", u, "<p><b>Password changed.</b> Use your new password next time you log in. <a href='/dashboard'>Back to Dashboard</a></p>"))
         if path == "/bill-payment":
-            if u[1] != "admin":
-                return self.send_html(page("Record payment", u, "<p>Only an admin can record payments.</p>"), 403)
             con = db()
+            if u[1] != "admin":
+                _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
+                if not _own or _own["created_by"] != u[0]:
+                    con.close()
+                    return self.send_html(page("Record payment", u, "<p>You can only record payments on bills you put in.</p>"), 403)
             r = con.execute("SELECT total, amount_paid FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
             if r:
                 new_paid = (r["amount_paid"] or 0) + float(f["amount"])
