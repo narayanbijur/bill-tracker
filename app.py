@@ -28,7 +28,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "bill_tracker.db")
 PORT = int(os.environ.get("BILL_TRACKER_PORT", "8000"))
 SESSIONS = {}  # token -> (username, role)
-STATUSES = ["Draft", "Sent", "Paid", "Part-paid", "Overdue"]
+STATUSES = ["Draft", "Sent", "Paid", "Part-paid", "Overdue", "Settled"]
 CYCLES = ["Monthly", "Quarterly", "Yearly", "One-time"]
 
 
@@ -96,7 +96,7 @@ def init_db():
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT, created_at TEXT)""",
+            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT, created_at TEXT, bill_kind TEXT DEFAULT 'Final')""",
     ]:
         con.execute(stmt)
     # Commit the base tables first. On PostgreSQL a failed statement
@@ -113,6 +113,7 @@ def init_db():
         "ALTER TABLE bills ADD COLUMN issued_by TEXT",
         "ALTER TABLE bills ADD COLUMN created_at TEXT",
         "ALTER TABLE clients ADD COLUMN created_at TEXT",
+        "ALTER TABLE bills ADD COLUMN bill_kind TEXT DEFAULT 'Final'",
     ]:
         try:
             con.execute(alter)
@@ -191,7 +192,7 @@ def fmt_ts(ts):
 
 
 def badge(status):
-    cls = {"Draft": "b-draft", "Sent": "b-sent", "Paid": "b-paid",
+    cls = {"Draft": "b-draft", "Sent": "b-sent", "Paid": "b-paid", "Settled": "b-paid",
            "Part-paid": "b-part", "Overdue": "b-over"}.get(status, "b-draft")
     return f'<span class="badge {cls}">{esc(status)}</span>'
 
@@ -363,7 +364,9 @@ password your admin gave you, then set your own here.</p>"""))
             JOIN clients c ON c.id=b.client_id ORDER BY b.id DESC LIMIT 5""").fetchall()
         con.close()
         billed = sum(b["total"] for b in bills)
-        paid = sum(b["total"] for b in bills if b["status"] == "Paid")
+        paid = sum(b["amount_paid"] or 0 for b in bills)
+        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] == "Settled")
+        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] == "Settled")
         overdue = [b for b in bills if b["status"] == "Overdue"]
         from collections import defaultdict
         from datetime import date as _d
@@ -381,7 +384,7 @@ password your admin gave you, then set your own here.</p>"""))
         today = _d.today().isoformat()
         aging = {"0-30 days": 0, "31-60 days": 0, "60+ days": 0}
         for b in bills:
-            if b["status"] == "Paid" or not b["due_date"] or b["due_date"] >= today:
+            if b["status"] in ("Paid", "Settled") or not b["due_date"] or b["due_date"] >= today:
                 continue
             days = (_d.fromisoformat(today) - _d.fromisoformat(b["due_date"])).days
             k = "0-30 days" if days <= 30 else "31-60 days" if days <= 60 else "60+ days"
@@ -407,7 +410,7 @@ password your admin gave you, then set your own here.</p>"""))
 <div class="kpi"><span>Active clients</span><b>{clients}</b></div>
 <div class="kpi"><span>Total billed</span><b>&#8377;{billed:,.2f}</b></div>
 <div class="kpi"><span>Paid</span><b>&#8377;{paid:,.2f}</b></div>
-<div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid:,.2f}</b></div></div>
+<div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid - settled_writeoff:,.2f}</b></div></div>
 <div class="card"><b>Overdue bills: <span class="red">{len(overdue)}</span></b> &nbsp;|&nbsp;
 Check <a href="/not-billed">Not billed yet</a> before month-end so no company is missed.</div>
 <div class="card"><b>Billed by period</b><div class="chart">{bars}</div></div>
@@ -464,8 +467,11 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         firm_filter = qs.get("firm", [""])[0]
         if firm_filter:
             rows = [r for r in rows if (r["issued_by"] or "") == firm_filter]
+        kind_filter = qs.get("kind", [""])[0]
+        if kind_filter:
+            rows = [r for r in rows if (r["bill_kind"] or "Final") == kind_filter]
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td><a href='/clients/{r['client_id']}'>{esc(r['cname'])}</a></td>"
-                     f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
+                     f"<td>{esc(r['bill_kind'] or 'Final')}</td><td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
                      f"{'<td class=\'amt\'>&#8377;' + format(r['total'], ',.2f') + '</td>' if u[1] == 'admin' else ''}<td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td>{'<td>' + fmt_ts(r['created_at']) + '</td>' if u[1] == 'admin' else ''}<td><a href='/edit-bill/{r['id']}'>Edit</a></td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
@@ -473,6 +479,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         filt = "".join(f"<option {'selected' if s == status else ''}>{s}</option>" for s in [""] + STATUSES)
         body = f"""<form method="post" action="/bills"><p>
 <select name="client_id" id="bill_client" required onchange="var o=this.options[this.selectedIndex];var a=document.getElementById('bill_amount');if(o&&o.dataset.fee&&parseFloat(o.dataset.fee)>0)a.value=o.dataset.fee">{opts}</select>
+<select name="bill_kind"><option>Final</option><option>Pro forma</option></select>
 <input name="period_label" placeholder="Period e.g. 2026-10" required>
 <input name="bill_date" type="date" required>
 <input name="due_date" type="date">
@@ -486,8 +493,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <button>Add bill</button></p></form>
 <form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
 <select name="status" onchange="this.form.submit()">{filt}</select>
-<select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
+<select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select>
+<select name="kind" onchange="this.form.submit()"><option value="">All kinds</option><option {'selected' if qs.get("kind", [""])[0] == 'Final' else ''}>Final</option><option {'selected' if qs.get("kind", [""])[0] == 'Pro forma' else ''}>Pro forma</option></select> <button>Search</button></form>
+<table><tr><th>Bill no.</th><th>Client</th><th>Kind</th><th>Period</th><th>Date</th>{"<th style=\"text-align:right\">Total</th>" if u[1] == "admin" else ""}<th>Status</th><th>Created by</th><th>Issued by</th>{"<th>Put in</th>" if u[1] == "admin" else ""}<th></th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -531,7 +539,9 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         balance = r["total"] - paid
         if u[1] != "admin":
             self.send_html(page(f"Invoice {r['bill_no']}", u, f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
+<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+{'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
+{'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
 <div>Due date: {esc(r['due_date']) or '-'}</div><div>Put in: {fmt_ts(r['created_at'])}</div></div></div>
 <p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
@@ -542,18 +552,23 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <tr><td>GST ({r['gst_percent']:.0f}%)</td><td class="amt">&#8377;{r['total'] - r['amount']:,.2f}</td></tr>
 <tr><td><b>Total</b></td><td class="amt"><b>&#8377;{r['total']:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
-<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance:,.2f}</b></td></tr></table>
+<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance if r['status'] != 'Settled' else 0:,.2f}</b></td></tr>
+{'<tr><td>Settled / written off</td><td class="amt">&#8377;' + format(balance, ',.2f') + '</td></tr>' if r['status'] == 'Settled' else ''}</table>
 <p><button onclick="window.print()">Print / Save as PDF</button></p>
+{'<form method="post" action="/convert-final"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Convert to final bill</button></form>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
 <p class="muted">This bill only — no totals across clients are shown on the Dashboard.</p></div>
 <div class="card"><b>Record payment</b>
 <form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
 <input name="amount" type="number" step="0.01" placeholder="Amount received" required>
 <input name="pay_date" type="date">
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="final_settlement" value="1"> This payment is the final settlement — close this bill even if a balance remains</label>
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""))
             return
         body = f"""<div class="card"><div class="invoice-head"><div>
-<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
+<h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])} | Kind: {esc(r['bill_kind'] or 'Final')}</p>
+{'<p class="muted"><b>PRO FORMA BILL</b> — not a final tax invoice. Convert it to a final bill when the amount is agreed.</p>' if (r['bill_kind'] or '') == 'Pro forma' else ''}
+{'<p class="muted"><b>Settled</b> — paid &#8377;' + format(paid, ',.2f') + ', balance &#8377;' + format(balance, ',.2f') + ' accepted as final settlement, not outstanding.</p>' if r['status'] == 'Settled' else ''}</div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
 <div>Due date: {esc(r['due_date']) or '-'}</div><div>Put in: {fmt_ts(r['created_at'])}</div></div></div>
 <p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
@@ -564,12 +579,15 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <tr><td>GST ({r['gst_percent']:.0f}%)</td><td class="amt">&#8377;{r['total'] - r['amount']:,.2f}</td></tr>
 <tr><td><b>Total</b></td><td class="amt"><b>&#8377;{r['total']:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
-<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance:,.2f}</b></td></tr></table>
-<p><button onclick="window.print()">Print / Save as PDF</button></p></div>
+<tr><td><b>Balance due</b></td><td class="amt"><b>&#8377;{balance if r['status'] != 'Settled' else 0:,.2f}</b></td></tr>
+{'<tr><td>Settled / written off</td><td class="amt">&#8377;' + format(balance, ',.2f') + '</td></tr>' if r['status'] == 'Settled' else ''}</table>
+<p><button onclick="window.print()">Print / Save as PDF</button></p>
+{'<form method="post" action="/convert-final"><input type="hidden" name="bill_id" value="' + str(bill_id) + '"><button>Convert to final bill</button></form>' if (r['bill_kind'] or '') == 'Pro forma' else ''}</div>
 <div class="card"><b>Record payment</b>
 <form method="post" action="/bill-payment"><input type="hidden" name="bill_id" value="{bill_id}">
 <input name="amount" type="number" step="0.01" placeholder="Amount received" required>
 <input name="pay_date" type="date">
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="final_settlement" value="1"> This payment is the final settlement — close this bill even if a balance remains</label>
 <button>Record payment</button></form>
 <p class="muted">Recording the full balance marks the bill Paid; a part payment marks it Part-paid.</p></div>"""
         self.send_html(page(f"Invoice {r['bill_no']}", u, body))
@@ -587,6 +605,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         con.close()
         billed = sum(b["total"] for b in bills)
         paid = sum(b["amount_paid"] or 0 for b in bills)
+        settled_writeoff = sum(b["total"] - (b["amount_paid"] or 0) for b in bills if b["status"] == "Settled")
         tr = "".join(f"<tr><td><a href='/bills/{b['id']}'>{esc(b['bill_no'])}</a></td><td>{esc(b['period_label'])}</td>"
                      f"<td>{esc(b['bill_date'])}</td><td class='amt'>&#8377;{b['total']:,.2f}</td>"
                      f"<td class='amt'>&#8377;{(b['amount_paid'] or 0):,.2f}</td><td>{badge(b['status'])}</td>"
@@ -600,7 +619,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <table><tr><th>Bill</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th><th>Issued by</th><th>Put in</th></tr>{tr}</table>
 <table class="totals"><tr><td><b>Total for this client</b></td><td class="amt"><b>&#8377;{billed:,.2f}</b></td></tr>
 <tr><td>Paid</td><td class="amt">&#8377;{paid:,.2f}</td></tr>
-<tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid:,.2f}</b></td></tr></table>
+<tr><td>Settled / written off for this client</td><td class="amt">&#8377;{settled_writeoff:,.2f}</td></tr>
+<tr><td><b>Outstanding for this client</b></td><td class="amt"><b>&#8377;{billed - paid - settled_writeoff:,.2f}</b></td></tr></table>
 <p class="muted">This is money for this one client only — the Dashboard never totals across all clients for staff.</p></div>"""
         self.send_html(page(c["name"], u, body))
 
@@ -643,6 +663,7 @@ Bill: <b>{esc(r['bill_no'])}</b> — {esc(r['cname'])}<br>
 <input name="amount" type="number" step="0.01" value="{r['amount']}" required>
 <input name="gst_percent" type="number" step="0.01" value="{r['gst_percent']}">
 <select name="status">{opts}</select>
+<select name="bill_kind"><option {'selected' if (r['bill_kind'] or 'Final') == 'Final' else ''}>Final</option><option {'selected' if r['bill_kind'] == 'Pro forma' else ''}>Pro forma</option></select>
 <input name="issued_by" value="{esc(r['issued_by'] or '')}" placeholder="Issued by (firm name)">
 <input name="notes" value="{esc(r['notes'])}" placeholder="Notes">
 <button>Save bill</button></p></form>
@@ -800,9 +821,12 @@ it on the Change password page straight away.</p>"""
             r = con.execute("SELECT total, amount_paid FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
             if r:
                 new_paid = (r["amount_paid"] or 0) + float(f["amount"])
-                status = "Paid" if new_paid >= r["total"] - 0.01 else "Part-paid"
+                if f.get("final_settlement"):
+                    status = "Settled"
+                else:
+                    status = "Paid" if new_paid >= r["total"] - 0.01 else "Part-paid"
                 con.execute("UPDATE bills SET amount_paid=?, status=? WHERE id=?", (new_paid, status, int(f["bill_id"])))
-                log_action(con, u[0], "Recorded payment", f"Bill id {f['bill_id']}: Rs {f['amount']} -> {status}")
+                log_action(con, u[0], "Recorded payment", f"Bill id {f['bill_id']}: Rs {f['amount']} -> {status}" + (" (final settlement, balance Rs " + format(r["total"] - new_paid, ",.2f") + " accepted)" if status == "Settled" else ""))
                 con.commit()
             con.close()
             return self.redirect(f"/bills/{f['bill_id']}")
@@ -838,6 +862,16 @@ it on the Change password page straight away.</p>"""
                 for tok in [t for t, v in list(SESSIONS.items()) if v[0] == target]:
                     SESSIONS.pop(tok, None)
                 return self.redirect("/users")
+            if path == "/convert-final":
+                if u[1] != "admin":
+                    _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["bill_id"]),)).fetchone()
+                    if not _own or _own["created_by"] != u[0]:
+                        con.close()
+                        return self.send_html(page("Convert bill", u, "<p>You can only convert bills you put in.</p>"), 403)
+                con.execute("UPDATE bills SET bill_kind='Final' WHERE id=?", (int(f["bill_id"]),))
+                log_action(con, u[0], "Converted pro forma to final", f"Bill id {f['bill_id']}")
+                con.commit(); con.close()
+                return self.redirect(f"/bills/{f['bill_id']}")
             if path == "/bill-edit":
                 if u[1] != "admin":
                     _own = con.execute("SELECT created_by FROM bills WHERE id=?", (int(f["id"]),)).fetchone()
@@ -846,10 +880,10 @@ it on the Change password page straight away.</p>"""
                         return self.send_html(page("Edit bill", u, "<p>You can only edit bills you put in.</p>"), 403)
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""UPDATE bills SET period_label=?, bill_date=?, due_date=?, amount=?, gst_percent=?,
-                    total=?, status=?, notes=?, issued_by=? WHERE id=?""",
+                    total=?, status=?, notes=?, issued_by=?, bill_kind=? WHERE id=?""",
                     (f["period_label"], f["bill_date"], f.get("due_date") or None, amt, gst,
                      round(amt * (1 + gst / 100), 2), f.get("status", "Draft"), f.get("notes", ""),
-                     f.get("issued_by", ""), int(f["id"])))
+                     f.get("issued_by", ""), f.get("bill_kind", "Final"), int(f["id"])))
                 log_action(con, u[0], "Edited bill", f"Bill id {f['id']}")
                 con.commit(); con.close()
                 return self.redirect("/bills")
@@ -904,12 +938,12 @@ it on the Change password page straight away.</p>"""
             elif path == "/bills":
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
-                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    amount, gst_percent, total, status, notes, created_by, issued_by, created_at, bill_kind)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
                      f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", ""),
-                     now_ist().strftime("%Y-%m-%d %H:%M")))
+                     now_ist().strftime("%Y-%m-%d %H:%M"), f.get("bill_kind", "Final")))
                 if f.get("remember_fee"):
                     con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
