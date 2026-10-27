@@ -96,7 +96,7 @@ def init_db():
             period_label TEXT NOT NULL, bill_date TEXT NOT NULL,
             due_date TEXT, amount REAL NOT NULL, gst_percent REAL DEFAULT 18,
             total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
-            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0)""",
+            notes TEXT, created_by TEXT, amount_paid REAL DEFAULT 0, issued_by TEXT)""",
     ]:
         con.execute(stmt)
     # Commit the base tables first. On PostgreSQL a failed statement
@@ -110,6 +110,7 @@ def init_db():
     for alter in [
         "ALTER TABLE bills ADD COLUMN amount_paid REAL DEFAULT 0",
         "ALTER TABLE clients ADD COLUMN created_by TEXT",
+        "ALTER TABLE bills ADD COLUMN issued_by TEXT",
     ]:
         try:
             con.execute(alter)
@@ -366,6 +367,8 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <table><tr><th>Client</th><th style="text-align:right">Billed</th></tr>{top_tr}</table></div>
 <div class="card"><b>Overdue ageing (unpaid, past due date)</b>
 <table><tr><th>Age</th><th style="text-align:right">Outstanding</th></tr>{aging_tr}</table></div>
+<div class="card"><b>Billed by firm name</b>
+<table><tr><th>Firm</th><th style="text-align:right">Billed</th></tr>{"".join(f"<tr><td>{esc(k or '(not set)')}</td><td class='amt'>&#8377;{v:,.2f}</td></tr>" for k, v in sorted(((lambda d: d)(__import__('collections').defaultdict(float, {kk: sum(b['total'] for b in bills if (b['issued_by'] or '') == kk) for kk in {bb['issued_by'] or '' for bb in bills}}))).items(), key=lambda x: -x[1]))}</table></div>
 <div class="card"><b>Recent bills</b>
 <table><tr><th>Bill</th><th>Client</th><th>Period</th><th style="text-align:right">Total</th><th>Status</th></tr>{tr}</table></div>"""
         self.send_html(page("Dashboard", u, body))
@@ -401,11 +404,16 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
         if status:
             sql += " WHERE b.status=?"; args.append(status)
         rows = con.execute(sql + " ORDER BY b.id DESC", args).fetchall()
+        firms = con.execute("SELECT DISTINCT issued_by FROM bills WHERE issued_by<>'' AND issued_by IS NOT NULL ORDER BY issued_by").fetchall()
         con.close()
         opts = "".join(f"<option value='{r['id']}' data-fee='{r['fee']}'>{esc(r['name'])}</option>" for r in clients)
+        firm_opts = "".join(f"<option>{esc(r['issued_by'])}</option>" for r in firms)
+        firm_filter = qs.get("firm", [""])[0]
+        if firm_filter:
+            rows = [r for r in rows if (r["issued_by"] or "") == firm_filter]
         tr = "".join(f"<tr><td><a href='/bills/{r['id']}'>{esc(r['bill_no'])}</a></td><td>{esc(r['cname'])}</td>"
                      f"<td>{esc(r['period_label'])}</td><td>{esc(r['bill_date'])}</td>"
-                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td></tr>" for r in rows)
+                     f"<td class='amt'>&#8377;{r['total']:,.2f}</td><td>{badge(r['status'])}</td><td>{esc(r['created_by'])}</td><td>{esc(r['issued_by'] or '')}</td></tr>" for r in rows)
         search = qs.get("search", [""])[0].lower()
         if search:
             rows = [r for r in rows if search in r["bill_no"].lower() or search in r["cname"].lower()]
@@ -419,11 +427,14 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="remember_fee"> Save this amount as this client’s usual fee for future bills</label>
 <input name="gst_percent" type="number" step="0.01" value="18" placeholder="GST %">
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
+<input name="issued_by" list="firms" placeholder="Issued by (firm name)">
+<datalist id="firms">{firm_opts}</datalist>
 <input name="notes" placeholder="Notes (service, etc.)">
 <button>Add bill</button></p></form>
 <form method="get"><input name="search" placeholder="Search bill no. or client" value="{esc(qs.get("search", [""])[0])}">
-<select name="status" onchange="this.form.submit()">{filt}</select> <button>Search</button></form>
-<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th><th>Created by</th></tr>{tr}</table>
+<select name="status" onchange="this.form.submit()">{filt}</select>
+<select name="firm" onchange="this.form.submit()"><option value="">All firms</option>{firm_opts}</select> <button>Search</button></form>
+<table><tr><th>Bill no.</th><th>Client</th><th>Period</th><th>Date</th><th style="text-align:right">Total</th><th>Status</th><th>Created by</th><th>Issued by</th></tr>{tr}</table>
 <p>To change a bill's status, use the form below: bill number + new status.</p>
 <form method="post" action="/bill-status"><p><input name="bill_no" placeholder="Bill no. e.g. BILL-2026-0001" required>
 <select name="status">{''.join(f'<option>{s}</option>' for s in STATUSES)}</select>
@@ -467,7 +478,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <h2>Invoice {esc(r['bill_no'])}</h2><p class="muted">Period: {esc(r['period_label'])}</p></div>
 <div class="invoice-meta"><div>{badge(r['status'])}</div><div>Bill date: {esc(r['bill_date'])}</div>
 <div>Due date: {esc(r['due_date']) or '-'}</div></div></div>
-<p><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
+<p><b>Issued by:</b> {esc(r['issued_by'] or '')}<br><b>Bill to:</b> {esc(r['cname'])}<br>{esc(r['cgstin'])}<br>{esc(r['ccontact'])} {esc(r['cemail'])}<br>Office: {esc(r['coffice'])}</p>
 <table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
 <tr><td>Professional services — {esc(r['period_label'])}<br><span class="muted">{esc(r['notes'])}</span></td>
 <td class="amt">&#8377;{r['amount']:,.2f}</td></tr></table>
@@ -531,14 +542,14 @@ it on the Change password page straight away.</p>"""
         import csv, io
         con = db()
         rows = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date,
-            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes
+            b.due_date, b.amount, b.gst_percent, b.total, b.status, b.notes, b.issued_by
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         con.close()
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes"])
+        w.writerow(["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Status", "Notes", "Issued by"])
         cols = ["bill_no", "name", "period_label", "bill_date", "due_date",
-                "amount", "gst_percent", "total", "status", "notes"]
+                "amount", "gst_percent", "total", "status", "notes", "issued_by"]
         w.writerows([[r[c] for c in cols] for r in rows])
         data = buf.getvalue().encode()
         self.send_response(200)
@@ -566,13 +577,13 @@ it on the Change password page straight away.</p>"""
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = 18
         bills = con.execute("""SELECT b.bill_no, c.name, b.period_label, b.bill_date, b.due_date,
-            b.amount, b.gst_percent, b.total, b.amount_paid, b.status, b.notes, b.created_by
+            b.amount, b.gst_percent, b.total, b.amount_paid, b.status, b.notes, b.created_by, b.issued_by
             FROM bills b JOIN clients c ON c.id=b.client_id ORDER BY b.id""").fetchall()
         clients = con.execute("SELECT * FROM clients ORDER BY name").fetchall()
         activity = con.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").fetchall()
         con.close()
-        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by"],
-              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by"])
+        sheet("Bills", ["Bill no", "Client", "Period", "Date", "Due", "Amount", "GST %", "Total", "Paid", "Status", "Notes", "Created by", "Issued by"],
+              bills, ["bill_no", "name", "period_label", "bill_date", "due_date", "amount", "gst_percent", "total", "amount_paid", "status", "notes", "created_by", "issued_by"])
         sheet("Clients", ["Client", "GSTIN", "Contact", "Phone", "Email", "Office", "Cycle", "Fee", "Active", "Created by"],
               clients, ["name", "gstin", "contact", "phone", "email", "office", "cycle", "fee", "active", "created_by"])
         sheet("Activity", ["When", "Staff", "Action", "Detail"],
@@ -686,11 +697,11 @@ it on the Change password page straight away.</p>"""
             elif path == "/bills":
                 amt = float(f["amount"]); gst = float(f.get("gst_percent") or 18)
                 con.execute("""INSERT INTO bills (bill_no, client_id, period_label, bill_date, due_date,
-                    amount, gst_percent, total, status, notes, created_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    amount, gst_percent, total, status, notes, created_by, issued_by)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (next_bill_no(con), int(f["client_id"]), f["period_label"], f["bill_date"],
                      f.get("due_date") or None, amt, gst, round(amt * (1 + gst / 100), 2),
-                     f.get("status", "Draft"), f.get("notes", ""), u[0]))
+                     f.get("status", "Draft"), f.get("notes", ""), u[0], f.get("issued_by", "")))
                 if f.get("remember_fee"):
                     con.execute("UPDATE clients SET fee=? WHERE id=?", (amt, int(f["client_id"])))
                 log_action(con, u[0], "Added bill", f"{f['period_label']} for client id {f['client_id']}")
