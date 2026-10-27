@@ -304,6 +304,7 @@ Password <input type="password" name="password" required></p>
 <p>New password <input type="password" id="npw1" name="new" required></p>
 <p>Confirm new password <input type="password" id="npw2" name="confirm" required></p>
 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" onclick="var a=document.getElementById('npw1'),b=document.getElementById('npw2');a.type=b.type=this.checked?'text':'password'"> Show password</label>
+<button type="button" onclick="navigator.clipboard.writeText(document.getElementById('npw1').value);this.textContent='Copied!'">Copy password</button>
 <button>Change password</button></form>
 <p class="muted">Use this on your first login too: log in with the temporary
 password your admin gave you, then set your own here.</p>"""))
@@ -516,6 +517,7 @@ Check <a href="/not-billed">Not billed yet</a> before month-end so no company is
 <input name="password" id="pw1" type="password" placeholder="Password" required>
 <input name="confirm" id="pw2" type="password" placeholder="Type password again" required>
 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" onclick="var a=document.getElementById('pw1'),b=document.getElementById('pw2');a.type=b.type=this.checked?'text':'password'"> Show password</label>
+<button type="button" onclick="navigator.clipboard.writeText(document.getElementById('pw1').value);this.textContent='Copied!'">Copy password</button>
 <select name="role"><option>staff</option><option>admin</option></select>
 <button>Add user</button></p></form>
 <table><tr><th>Username</th><th>Role</th></tr>{tr}</table>
