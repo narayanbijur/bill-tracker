@@ -258,7 +258,7 @@ button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4
 .brand{{font-size:20px;font-weight:800;margin:0 0 26px 8px;line-height:1.2}} .brand span{{font-size:14px;font-weight:600;color:#93c5fd;letter-spacing:.4px;text-transform:uppercase}} aside a{{display:block;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:8px;margin:2px 0}}
 aside a:hover{{background:#1e3f66;color:#fff}} main{{flex:1;padding:28px 32px;max-width:1280px}}
 h1{{font-size:22px;margin:0 0 18px}} .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}}
-.kpi{{background:#fff;border:1px solid #e2e8f0;border-left:4px solid #2563eb;border-radius:14px;padding:18px;box-shadow:0 2px 10px rgba(15,40,80,.06)}} .kpi:nth-child(2){{border-left-color:#059669}} .kpi:nth-child(3){{border-left-color:#7c3aed}} .kpi:nth-child(4){{border-left-color:#dc2626}} .kpi b{{font-size:22px;display:block;margin-top:4px}}
+.kpi{{background:#fff;border:1px solid #e2e8f0;border-left:4px solid #2563eb;border-radius:14px;padding:18px;box-shadow:0 2px 10px rgba(15,40,80,.06)}} .kpi:nth-child(2){{border-left-color:#7c3aed}} .kpi:nth-child(3){{border-left-color:#059669}} .kpi:nth-child(4){{border-left-color:#dc2626}} .kpi b{{font-size:22px;display:block;margin-top:4px}}
 .kpi span{{color:#64748b;font-size:13px}} .card{{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:20px;margin-bottom:16px;box-shadow:0 4px 16px rgba(15,40,80,.06)}}
 table{{border-collapse:collapse;width:100%;font-size:14px}} th{{text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;padding:10px 8px;border-bottom:1px solid #e2e8f0}}
 td{{padding:11px 8px;border-bottom:1px solid #f1f5f9}} tr:hover td{{background:#f8fafc}} .amt{{text-align:right;font-variant-numeric:tabular-nums}}
@@ -276,7 +276,7 @@ button:hover{{transform:translateY(-1px);box-shadow:0 8px 20px rgba(37,99,235,.4
 .chart{{display:flex;align-items:flex-end;gap:10px;height:120px;padding-top:10px}}
 .bar{{flex:1;background:linear-gradient(180deg,#60a5fa,#2563eb);border-radius:6px 6px 0 0;min-height:4px}}
 .bar-wrap{{flex:1;text-align:center;font-size:11px;color:#64748b}}
-.warn{{background:#fffbeb;border:1px solid #fde68a;padding:12px;border-radius:10px}} .red{{color:#b91c1c}} .muted{{color:#64748b}}
+.warn{{background:#fffbeb;border:1px solid #fde68a;padding:12px;border-radius:10px}} .red{{color:#b91c1c}} .green{{color:#059669}} .purple{{color:#7c3aed}} .muted{{color:#64748b}}
 @media(max-width:1024px){{main{{padding:20px}} .kpis{{grid-template-columns:1fr 1fr}}}} @media(max-width:760px){{.layout{{flex-direction:column}} aside{{width:100%;height:auto;position:static}} .kpis{{grid-template-columns:1fr}}}}
 </style></head><body><div class="layout">{nav}<main><div class="topbar"><div><a class="btn" href="/clients">+ New client</a>
 <a class="btn" href="/bills">+ New bill</a></div>
@@ -446,8 +446,8 @@ password your admin gave you, then set your own here.</p>"""))
             return
         body = f"""<div class="kpis">
 <div class="kpi"><span>Active clients</span><b>{clients}</b></div>
-<div class="kpi"><span>Total billed</span><b>&#8377;{billed:,.2f}</b></div>
-<div class="kpi"><span>Paid</span><b>&#8377;{paid:,.2f}</b></div>
+<div class="kpi"><span>Total billed</span><b class="purple">&#8377;{billed:,.2f}</b></div>
+<div class="kpi"><span>Paid</span><b class="green">&#8377;{paid:,.2f}</b></div>
 <div class="kpi"><span>Outstanding</span><b class="red">&#8377;{billed - paid - settled_writeoff:,.2f}</b></div></div>
 <p class="muted">Pro forma bills (not counted above): &#8377;{proforma_total:,.2f} — pro forma totals are shown separately and never added to billed or outstanding.</p>
 <div class="card"><b>Overdue bills: <span class="red">{len(overdue)}</span></b> &nbsp;|&nbsp;
